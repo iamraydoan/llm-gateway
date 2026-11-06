@@ -2,10 +2,12 @@ package pool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -278,6 +280,21 @@ func (k *Key) earliestRetryLocked(now time.Time) time.Time {
 	return best
 }
 
+func (k *Key) ExtendCooldown(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	k.mu.Lock()
+	if until := time.Now().Add(d); until.After(k.cooldownUntil) {
+		k.cooldownUntil = until
+	}
+	notify := k.notify
+	k.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
 func (k *Key) ReportSuccess() {
 	k.mu.Lock()
 	k.TotalRequests++
@@ -527,12 +544,65 @@ func IsQuotaError(body string) bool {
 		"exceeded your current quota",
 		"billing",
 		"quota",
+		"free_tier_limit_reached",
+		"free allowance",
 	} {
 		if strings.Contains(lower, s) {
 			return true
 		}
 	}
 	return false
+}
+
+var freeTierResetRe = regexp.MustCompile(`starts on ([0-9]{1,2} [A-Za-z]{3} [0-9]{4} at [0-9]{2}:[0-9]{2} UTC)`)
+
+func ParseFreeTierReset(message string) time.Time {
+	m := freeTierResetRe.FindStringSubmatch(message)
+	if m == nil {
+		return time.Time{}
+	}
+	t, err := time.Parse("2 Jan 2006 at 15:04 MST", m[1])
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+func errorField(body []byte, path string) (any, bool) {
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	cur := root
+	for _, part := range strings.Split(path, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+func MatchErrorRules(body []byte, rules []config.ErrorRule) (delay, cooldown time.Duration, matched bool) {
+	for _, r := range rules {
+		v, ok := errorField(body, r.Path)
+		if !ok {
+			continue
+		}
+		got, isStr := v.(string)
+		if !isStr {
+			got = fmt.Sprintf("%v", v)
+		}
+		if got != r.Value {
+			continue
+		}
+		return time.Duration(r.DelaySeconds) * time.Second, time.Duration(r.CooldownSeconds) * time.Second, true
+	}
+	return 0, 0, false
 }
 
 func ParseRetryAfter(v string) time.Duration {

@@ -20,6 +20,21 @@ upstream:
   # body as-is. A per-key relay_url overrides this one.
   # relay_url: "https://your-relay.vercel.app"
 
+  # Per-error actions, matched against the upstream error response body.
+  # Each rule takes a JSON path (dot-separated, e.g. error.code) and the
+  # value it must equal; the first matching rule wins. delay_seconds pauses
+  # before the next attempt (failover/retry) of the same request, and
+  # cooldown_seconds parks the failed key for that long on top of the
+  # normal backoff. Set either one or both; a rule must set at least one.
+  # The free-tier weekly quota error (code free_tier_limit_reached) is
+  # handled built-in: the gateway parses the reset date from the error
+  # message and parks the key until then, no rule needed for it.
+  error_rules:
+    - path: "error.code"
+      value: "server_busy"
+      delay_seconds: 5
+      cooldown_seconds: 300
+
 # Model mapping: requested model -> upstream model.
 # Unmapped models pass through unchanged.
 model_map:

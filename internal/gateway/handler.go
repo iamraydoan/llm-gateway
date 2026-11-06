@@ -164,14 +164,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 type upstreamError struct {
-	status     int
-	body       []byte
-	retryAfter time.Duration
-	quota      bool
-	quotaReset time.Time
+	status       int
+	body         []byte
+	retryAfter   time.Duration
+	quota        bool
+	quotaReset   time.Time
+	ruleDelay    time.Duration
+	ruleCooldown time.Duration
 }
 
-func classifyUpstream(resp *http.Response, body []byte) upstreamError {
+func classifyUpstream(resp *http.Response, body []byte, rules []config.ErrorRule) upstreamError {
 	ue := upstreamError{status: resp.StatusCode, body: body}
 	ue.retryAfter = pool.ParseRetryAfter(resp.Header.Get("Retry-After"))
 
@@ -186,8 +188,29 @@ func classifyUpstream(resp *http.Response, body []byte) upstreamError {
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		ue.quota = pool.IsQuotaError(string(body))
+		if reset := pool.ParseFreeTierReset(string(body)); !reset.IsZero() && reset.After(time.Now()) {
+			if reset.After(ue.quotaReset) {
+				ue.quotaReset = reset
+			}
+			ue.quota = true
+		}
 	}
+	ue.ruleDelay, ue.ruleCooldown, _ = pool.MatchErrorRules(body, rules)
 	return ue
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, key *pool.Key, method, path string, body []byte, stream bool) (*http.Response, *upstreamError, error) {
@@ -219,7 +242,7 @@ func (g *Gateway) doUpstream(ctx context.Context, key *pool.Key, method, path st
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		ue := classifyUpstream(resp, b)
+		ue := classifyUpstream(resp, b, g.cfg.Upstream.ErrorRules)
 		return nil, &ue, nil
 	}
 	return resp, nil, nil
@@ -369,11 +392,17 @@ func (g *Gateway) runAttempts(ctx context.Context, method, path string, body []b
 		if ue != nil {
 			cancel()
 			key.ReportFailure(ue.status, ue.retryAfter, ue.quota, ue.quotaReset, strings.TrimSpace(string(ue.body)))
+			if ue.ruleCooldown > 0 {
+				key.ExtendCooldown(ue.ruleCooldown)
+			}
 			release()
 			attemptLog.status = ue.status
 			attemptLog.errMsg = strings.TrimSpace(string(ue.body))
 			g.finishLog(attemptLog)
 			lastErr = ue
+			if ue.ruleDelay > 0 && attempt+1 < g.maxAttempts() && !sleepCtx(ctx, ue.ruleDelay) {
+				return attemptResult{canceled: true}
+			}
 			continue
 		}
 

@@ -1314,3 +1314,122 @@ func TestClientCancelDoesNotPenalizeKey(t *testing.T) {
 		t.Fatalf("errors-only logs total = %d, want 0", logsOut.Total)
 	}
 }
+
+func newTestGatewayWithRules(t *testing.T, upstreamURL string, keys []config.Key, rules []config.ErrorRule) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := &config.Config{}
+	cfg.Server.Listen = ":0"
+	cfg.Server.MaxFailovers = 10
+	cfg.Upstream.BaseURL = upstreamURL
+	cfg.Upstream.TimeoutSeconds = 5
+	cfg.Upstream.ErrorRules = rules
+	cfg.Keys = keys
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	p, err := pool.NewFromKeys(cfg.Keys, 5*time.Second)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	gw := New(cfg, p, st, nil)
+	srv := httptest.NewServer(gw.Routes())
+	t.Cleanup(srv.Close)
+	return srv, st
+}
+
+const freeTierBody = `{"error":{"message":"You've used this period's free allowance. Your next rolling 7-day period starts on 10 Nov 2026 at 02:38 UTC. Use the paid model 'deepseek-v4-flash' to keep going, or subscribe to a Token Harbor Pass for a recurring included allowance across more models. https://tokenharbor.ai/pricing","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`
+
+func TestFreeTierQuotaReset(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	up.behaviors["tok-bad"] = errJSON(429, freeTierBody, map[string]string{"Retry-After": "3600"})
+	up.behaviors["tok-good"] = okJSON(0)
+	gw, _ := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "bad", APIKey: "tok-bad", Priority: 1, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true},
+	}, nil, "")
+	defer gw.Close()
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 via failover", status)
+	}
+	row := keyRowByID(keysList(t, gw.URL), "bad")
+	if row == nil {
+		t.Fatal("key bad missing from /api/keys")
+	}
+	if row["skip_reason"] != "quota-exhausted" {
+		t.Fatalf("skip_reason = %v, want quota-exhausted", row["skip_reason"])
+	}
+	if row["quota_reset_at"] != "2026-11-10T02:38:00Z" {
+		t.Fatalf("quota_reset_at = %v, want 2026-11-10T02:38:00Z", row["quota_reset_at"])
+	}
+	if retry, _ := row["retry_in_seconds"].(float64); retry < 3*24*3600 {
+		t.Fatalf("retry_in_seconds = %v, want more than 3 days", retry)
+	}
+	if lastErr, _ := row["last_error"].(string); !strings.Contains(lastErr, "free_tier_limit_reached") {
+		t.Fatalf("last_error = %q, want the upstream body", lastErr)
+	}
+}
+
+const serverBusyBody = `{"error":{"message":"Token Harbor is under heavy load. Requests from this account are being slowed down for a few minutes; please retry shortly.","type":"rate_limit_error","code":"server_busy"}}`
+
+func runErrorRuleCase(t *testing.T, rules []config.ErrorRule, body string, wantMinElapsed time.Duration, wantRetryMin, wantRetryMax float64) {
+	t.Helper()
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	up.behaviors["tok-bad"] = errJSON(429, body, nil)
+	up.behaviors["tok-good"] = okJSON(0)
+	gw, _ := newTestGatewayWithRules(t, srv.URL, []config.Key{
+		{ID: "bad", APIKey: "tok-bad", Priority: 1, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true},
+	}, rules)
+	defer gw.Close()
+	client := &http.Client{Timeout: 10 * time.Second}
+	start := time.Now()
+	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	elapsed := time.Since(start)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 via failover", status)
+	}
+	if elapsed < wantMinElapsed {
+		t.Fatalf("elapsed = %v, want at least %v", elapsed, wantMinElapsed)
+	}
+	row := keyRowByID(keysList(t, gw.URL), "bad")
+	if row == nil {
+		t.Fatal("key bad missing from /api/keys")
+	}
+	if row["skip_reason"] != "cooldown" {
+		t.Fatalf("skip_reason = %v, want cooldown", row["skip_reason"])
+	}
+	retry, _ := row["retry_in_seconds"].(float64)
+	if retry < wantRetryMin || retry > wantRetryMax {
+		t.Fatalf("retry_in_seconds = %v, want %v..%v", retry, wantRetryMin, wantRetryMax)
+	}
+}
+
+func TestErrorRuleDelayAndCooldown(t *testing.T) {
+	rules := []config.ErrorRule{{Path: "error.code", Value: "server_busy", DelaySeconds: 1, CooldownSeconds: 60}}
+	runErrorRuleCase(t, rules, serverBusyBody, time.Second, 55, 60)
+}
+
+func TestErrorRuleDelayOnly(t *testing.T) {
+	rules := []config.ErrorRule{{Path: "error.code", Value: "server_busy", DelaySeconds: 1}}
+	runErrorRuleCase(t, rules, serverBusyBody, time.Second, 3, 5)
+}
+
+func TestErrorRuleCooldownOnly(t *testing.T) {
+	rules := []config.ErrorRule{{Path: "error.code", Value: "server_busy", CooldownSeconds: 60}}
+	runErrorRuleCase(t, rules, serverBusyBody, 0, 55, 60)
+}
+
+func TestErrorRuleNoMatch(t *testing.T) {
+	rules := []config.ErrorRule{{Path: "error.code", Value: "server_busy", DelaySeconds: 1, CooldownSeconds: 60}}
+	runErrorRuleCase(t, rules, `{"error":{"message":"slow down","type":"rate_limit_error","code":"other"}}`, 0, 4, 5)
+}

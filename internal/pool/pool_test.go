@@ -326,3 +326,71 @@ func TestSlidingWindowExpiry(t *testing.T) {
 		rel()
 	}
 }
+
+func TestParseFreeTierReset(t *testing.T) {
+	msg := "You've used this period's free allowance. Your next rolling 7-day period starts on 10 Nov 2026 at 02:38 UTC. Use the paid model 'deepseek-v4-flash' to keep going."
+	got := ParseFreeTierReset(msg)
+	want := time.Date(2026, time.November, 10, 2, 38, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got := ParseFreeTierReset("no reset date here"); !got.IsZero() {
+		t.Fatalf("no-date message should give zero time, got %v", got)
+	}
+	if got := ParseFreeTierReset("starts on 32 Foo 2026 at 99:99 UTC"); !got.IsZero() {
+		t.Fatalf("bad date should give zero time, got %v", got)
+	}
+}
+
+func TestIsQuotaErrorFreeTier(t *testing.T) {
+	body := `{"error":{"message":"You've used this period's free allowance. Your next rolling 7-day period starts on 10 Nov 2026 at 02:38 UTC.","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`
+	if !IsQuotaError(body) {
+		t.Fatal("free tier limit body should be a quota error")
+	}
+}
+
+func TestMatchErrorRules(t *testing.T) {
+	rules := []config.ErrorRule{
+		{Path: "error.code", Value: "server_busy", DelaySeconds: 5, CooldownSeconds: 300},
+		{Path: "error.type", Value: "rate_limit_error", DelaySeconds: 1},
+	}
+	busy := []byte(`{"error":{"message":"Token Harbor is under heavy load.","type":"rate_limit_error","code":"server_busy"}}`)
+	d, c, ok := MatchErrorRules(busy, rules)
+	if !ok || d != 5*time.Second || c != 300*time.Second {
+		t.Fatalf("server_busy: got delay %v cooldown %v matched %v, want 5s 300s true", d, c, ok)
+	}
+	other := []byte(`{"error":{"message":"slow down","type":"rate_limit_error","code":"other"}}`)
+	d, c, ok = MatchErrorRules(other, rules)
+	if !ok || d != time.Second || c != 0 {
+		t.Fatalf("type-only match: got delay %v cooldown %v matched %v, want 1s 0 true", d, c, ok)
+	}
+	nomatch := []byte(`{"error":{"message":"boom","type":"server_error","code":"internal"}}`)
+	if _, _, ok := MatchErrorRules(nomatch, rules); ok {
+		t.Fatal("unrelated error should not match")
+	}
+	if _, _, ok := MatchErrorRules([]byte(`not json`), rules); ok {
+		t.Fatal("non-JSON body should not match")
+	}
+	num := []byte(`{"error":{"status":429}}`)
+	d, _, ok = MatchErrorRules(num, []config.ErrorRule{{Path: "error.status", Value: "429", DelaySeconds: 2}})
+	if !ok || d != 2*time.Second {
+		t.Fatalf("numeric value: got delay %v matched %v, want 2s true", d, ok)
+	}
+}
+
+func TestExtendCooldown(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+	})
+	k := p.Find("k1")
+	now := time.Now()
+	k.ReportFailure(500, 0, false, time.Time{}, "boom")
+	k.ExtendCooldown(60 * time.Second)
+	if secs := k.Status(now).RetryInSeconds; secs < 55 || secs > 60 {
+		t.Fatalf("extend to 60s: got retry in %ds", secs)
+	}
+	k.ExtendCooldown(time.Second)
+	if secs := k.Status(now).RetryInSeconds; secs < 55 || secs > 60 {
+		t.Fatalf("shorter extend must not shorten cooldown, got retry in %ds", secs)
+	}
+}

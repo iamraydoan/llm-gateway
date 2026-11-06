@@ -85,10 +85,18 @@ type Server struct {
 	MaxFailovers int    `yaml:"max_failovers"`
 }
 
+type ErrorRule struct {
+	Path            string `yaml:"path"`
+	Value           string `yaml:"value"`
+	DelaySeconds    int    `yaml:"delay_seconds"`
+	CooldownSeconds int    `yaml:"cooldown_seconds"`
+}
+
 type Upstream struct {
-	BaseURL        string `yaml:"base_url"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	RelayURL       string `yaml:"relay_url"`
+	BaseURL        string      `yaml:"base_url"`
+	TimeoutSeconds int         `yaml:"timeout_seconds"`
+	RelayURL       string      `yaml:"relay_url"`
+	ErrorRules     []ErrorRule `yaml:"error_rules"`
 }
 
 type Config struct {
@@ -160,6 +168,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	for i, r := range c.Upstream.ErrorRules {
+		if r.Path == "" {
+			return fmt.Errorf("config: upstream.error_rules[%d] must set path", i)
+		}
+		if r.Value == "" {
+			return fmt.Errorf("config: upstream.error_rules[%d] must set value", i)
+		}
+		if r.DelaySeconds < 0 || r.CooldownSeconds < 0 {
+			return fmt.Errorf("config: upstream.error_rules[%d] delay_seconds and cooldown_seconds must not be negative", i)
+		}
+		if r.DelaySeconds == 0 && r.CooldownSeconds == 0 {
+			return fmt.Errorf("config: upstream.error_rules[%d] must set delay_seconds or cooldown_seconds", i)
+		}
 	}
 	if c.Server.MaxFailovers <= 0 {
 		c.Server.MaxFailovers = 10

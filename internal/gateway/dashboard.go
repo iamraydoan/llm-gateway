@@ -188,11 +188,11 @@ func kStatusReason(k *pool.Key, now time.Time) string {
 	if !st.Enabled {
 		return "disabled"
 	}
-	if st.CooldownUntil != "" {
-		return "cooldown"
-	}
 	if st.QuotaResetAt != "" {
 		return "quota-exhausted"
+	}
+	if st.CooldownUntil != "" {
+		return "cooldown"
 	}
 	for _, rl := range st.RateLimits {
 		if rl.Remaining <= 0 {

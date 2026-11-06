@@ -168,3 +168,71 @@ func TestKeyDuplicateIDStillErrors(t *testing.T) {
 		t.Fatalf("validate with duplicate id = nil, want error")
 	}
 }
+
+func TestErrorRulesConfig(t *testing.T) {
+	cfg := parseConfig(t, `
+server:
+  listen: ":8080"
+upstream:
+  base_url: "https://tokenharbor.ai"
+  error_rules:
+    - path: "error.code"
+      value: "server_busy"
+      delay_seconds: 5
+      cooldown_seconds: 300
+keys:
+  - "sk-test"
+`)
+	if len(cfg.Upstream.ErrorRules) != 1 {
+		t.Fatalf("error_rules = %v, want 1 rule", cfg.Upstream.ErrorRules)
+	}
+	r := cfg.Upstream.ErrorRules[0]
+	if r.Path != "error.code" || r.Value != "server_busy" || r.DelaySeconds != 5 || r.CooldownSeconds != 300 {
+		t.Fatalf("rule = %+v, want server_busy 5s/300s", r)
+	}
+	for _, bad := range []string{
+		`
+server:
+  listen: ":8080"
+upstream:
+  base_url: "https://tokenharbor.ai"
+  error_rules:
+    - path: ""
+      value: "server_busy"
+      delay_seconds: 5
+keys:
+  - "sk-test"
+`,
+		`
+server:
+  listen: ":8080"
+upstream:
+  base_url: "https://tokenharbor.ai"
+  error_rules:
+    - path: "error.code"
+      value: "server_busy"
+keys:
+  - "sk-test"
+`,
+		`
+server:
+  listen: ":8080"
+upstream:
+  base_url: "https://tokenharbor.ai"
+  error_rules:
+    - path: "error.code"
+      value: "server_busy"
+      delay_seconds: -1
+keys:
+  - "sk-test"
+`,
+	} {
+		var cfg Config
+		if err := yaml.Unmarshal([]byte(bad), &cfg); err != nil {
+			t.Fatalf("yaml: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("validate(%q) = nil, want error", bad)
+		}
+	}
+}
