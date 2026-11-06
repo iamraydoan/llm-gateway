@@ -70,9 +70,6 @@
   .rl-row { display:flex; gap:8px; margin-bottom:6px; }
   .rl-row input { flex:1; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:13px; }
   .modal .actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-  .toast { position:fixed; bottom:20px; right:20px; background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 16px; display:none; z-index:20; }
-  .toast.show { display:block; }
-  .toast.err { border-color:var(--red); color:var(--red); }
   .live-on { color:var(--green); font-weight:600; }
   .live-off { color:var(--muted); }
 </style>
@@ -111,9 +108,9 @@
     </section>
 
     <section class="page" id="page-keys">
-      <div class="page-head"><h2>Keys</h2><span class="muted">priority order — first usable key wins</span><span class="spacer"></span><button class="primary" onclick="openKeyModal()">+ Add key</button></div>
+      <div class="page-head"><h2>Keys</h2><span class="muted">from config.yaml — edit the file and restart to change</span></div>
       <table id="keys">
-        <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Last error</th><th>Proxy</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Last error</th><th>Proxy</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -143,43 +140,15 @@
     </section>
 
     <section class="page" id="page-models">
-      <div class="page-head"><h2>Model Map</h2><span class="muted">requested model → upstream model</span></div>
-      <div class="filters">
-        <div><label>Requested model</label><input type="text" id="mm-from" placeholder="cheap" size="18"></div>
-        <div><label>Upstream model</label><input type="text" id="mm-to" placeholder="gpt-4o-mini" size="18"></div>
-        <button class="primary" onclick="addMapping()">Add / Update</button>
-      </div>
+      <div class="page-head"><h2>Model Map</h2><span class="muted">requested model → upstream model — from config.yaml</span></div>
       <table id="mappings">
-        <thead><tr><th>Requested</th><th>Upstream</th><th></th></tr></thead>
+        <thead><tr><th>Requested</th><th>Upstream</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
   </main>
 </div>
 
-<div class="modal-back" id="key-modal-back">
-  <div class="modal">
-    <h3 id="key-modal-title">Add key</h3>
-    <input type="hidden" id="km-id-original">
-    <div class="row2">
-      <div class="field"><label>Name *</label><input id="km-name" placeholder="Main account"></div>
-      <div class="field"><label>ID</label><input id="km-id" placeholder="auto from name"><div class="hint">unique, lowercase; empty = auto</div></div>
-    </div>
-    <div class="field"><label>API key <span id="km-key-hint">*</span></label><input id="km-apikey" type="password" placeholder="sk-..." autocomplete="off"><div class="hint" id="km-key-note">stored in SQLite, never shown in full.</div></div>
-    <div class="field"><label>Proxy</label><input id="km-proxy" placeholder="http://user:pass@host:port (empty = direct)"></div>
-    <div class="row2">
-      <div class="field"><label>Priority</label><input id="km-priority" type="number" value="1" min="1"><div class="hint">lower = tried first</div></div>
-      <div class="field"><label>Max concurrency</label><input id="km-conc" type="number" value="5" min="0"><div class="hint">0 = unlimited</div></div>
-    </div>
-    <div class="field"><label><input type="checkbox" id="km-enabled" checked> Enabled</label></div>
-    <div class="field"><label>Rate limits</label><div id="km-rl"></div><button type="button" onclick="addRlRow()">+ Add limit</button></div>
-    <div class="actions">
-      <button onclick="closeKeyModal()">Cancel</button>
-      <button class="primary" onclick="saveKey()">Save</button>
-    </div>
-  </div>
-</div>
-<div class="toast" id="toast"></div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -190,12 +159,6 @@ let logOffset = 0, logTotal = 0;
 let currentStats = null;
 let live = false, pollTimer = null, es = null;
 
-function toast(msg, isErr) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.className = 'toast show' + (isErr ? ' err' : '');
-  setTimeout(() => t.className = 'toast', 3500);
-}
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
@@ -252,11 +215,6 @@ function renderKeys(data) {
       <td class="mono">${cd}</td>
       <td>${errCell}</td>
       <td class="mono muted">${k.proxy ? esc(k.proxy.replace(/:\/\/[^@]+@/, '://***@')) : 'direct'}</td>
-      <td style="white-space:nowrap">
-        <button onclick="openKeyModal('${esc(k.id)}')">Edit</button>
-        <button onclick="toggleKey('${esc(k.id)}', ${!k.enabled})">${k.enabled ? 'Disable' : 'Enable'}</button>
-        <button class="danger" onclick="deleteKey('${esc(k.id)}', '${esc(k.name || k.id)}')">Delete</button>
-      </td>
     </tr>`;
   }).join('');
   $('#st-ready').textContent = ready + ' / ' + keysCache.length;
@@ -270,69 +228,6 @@ async function loadKeys() {
   sel.innerHTML = '<option value="">all keys</option>' + keysCache.map(k => `<option value="${esc(k.id)}">${esc(k.name || k.id)} (${esc(k.id)})</option>`).join('');
   sel.value = cur;
 }
-async function toggleKey(id, enabled) {
-  try { await api(`/api/keys/toggle?id=${encodeURIComponent(id)}&enabled=${enabled}`, {method:'POST'}); loadKeys(); }
-  catch (e) { toast(e.message, true); }
-}
-async function deleteKey(id, name) {
-  if (!confirm(`Delete key "${name}" (${id})?`)) return;
-  try { await api(`/api/keys?id=${encodeURIComponent(id)}`, {method:'DELETE'}); toast('Key deleted'); loadKeys(); }
-  catch (e) { toast(e.message, true); }
-}
-
-function rlRow(max, win) {
-  const div = document.createElement('div');
-  div.className = 'rl-row';
-  div.innerHTML = `<input type="number" min="1" placeholder="max" value="${max ?? ''}"><input type="text" placeholder="window (1m, 1h, 1d)" value="${esc(win ?? '')}"><button type="button" onclick="this.parentElement.remove()">✕</button>`;
-  return div;
-}
-function addRlRow(max, win) { $('#km-rl').appendChild(rlRow(max, win)); }
-function openKeyModal(id) {
-  const editing = !!id;
-  const k = editing ? keysCache.find(x => x.id === id) : null;
-  $('#key-modal-title').textContent = editing ? 'Edit key' : 'Add key';
-  $('#km-id-original').value = id || '';
-  $('#km-name').value = k ? (k.name || '') : '';
-  $('#km-id').value = k ? k.id : '';
-  $('#km-id').disabled = editing;
-  $('#km-apikey').value = '';
-  $('#km-apikey').placeholder = editing ? '(leave empty to keep current key)' : 'sk-...';
-  $('#km-key-hint').textContent = editing ? '' : '*';
-  $('#km-proxy').value = k ? (k.proxy || '') : '';
-  $('#km-priority').value = k ? k.priority : 1;
-  $('#km-conc').value = k ? k.max_concurrency : 5;
-  $('#km-enabled').checked = k ? k.enabled : true;
-  $('#km-rl').innerHTML = '';
-  if (k && k.rate_limits && k.rate_limits.length) k.rate_limits.forEach(r => addRlRow(r.max, r.window));
-  else addRlRow(5, '1m');
-  $('#key-modal-back').classList.add('open');
-}
-function closeKeyModal() { $('#key-modal-back').classList.remove('open'); }
-async function saveKey() {
-  const editing = !!$('#km-id-original').value;
-  const rls = [...$('#km-rl').children].map(row => {
-    const [maxEl, winEl] = row.querySelectorAll('input');
-    return { max: parseInt(maxEl.value, 10), window: winEl.value.trim() };
-  }).filter(r => r.window && r.max > 0);
-  const body = {
-    id: $('#km-id').value.trim(),
-    name: $('#km-name').value.trim(),
-    api_key: $('#km-apikey').value.trim(),
-    proxy: $('#km-proxy').value.trim(),
-    priority: parseInt($('#km-priority').value, 10) || 1,
-    max_concurrency: parseInt($('#km-conc').value, 10) || 0,
-    enabled: $('#km-enabled').checked,
-    rate_limits: rls,
-  };
-  if (!body.name) return toast('Name is required', true);
-  if (!editing && !body.api_key) return toast('API key is required', true);
-  try {
-    if (editing) await api(`/api/keys?id=${encodeURIComponent($('#km-id-original').value)}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    else await api('/api/keys', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    closeKeyModal(); toast(editing ? 'Key updated' : 'Key added'); loadKeys();
-  } catch (e) { toast(e.message, true); }
-}
-
 function renderStats(stats) {
   currentStats = stats;
   $('#st-total').textContent = stats.total_requests ?? 0;
@@ -425,25 +320,9 @@ async function loadMappings() {
   const data = await api('/api/model-map');
   const m = data.model_map || {};
   $('#mappings tbody').innerHTML = Object.entries(m).map(([from, to]) => `<tr>
-    <td class="mono">${esc(from)}</td><td class="mono">${esc(to)}</td>
-    <td><button class="danger" onclick="deleteMapping('${esc(from)}')">Delete</button></td></tr>`).join('')
-    || '<tr><td colspan="3" class="muted">no mappings — models pass through unchanged</td></tr>';
+    <td class="mono">${esc(from)}</td><td class="mono">${esc(to)}</td></tr>`).join('')
+    || '<tr><td colspan="2" class="muted">no mappings — models pass through unchanged</td></tr>';
 }
-async function addMapping() {
-  const from = $('#mm-from').value.trim(), to = $('#mm-to').value.trim();
-  if (!from || !to) return toast('Both fields are required', true);
-  try {
-    await api('/api/model-map', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({requested: from, upstream: to})});
-    $('#mm-from').value = ''; $('#mm-to').value = '';
-    toast('Mapping saved'); loadMappings();
-  } catch (e) { toast(e.message, true); }
-}
-async function deleteMapping(from) {
-  if (!confirm(`Delete mapping "${from}"?`)) return;
-  try { await api('/api/model-map?requested=' + encodeURIComponent(from), {method:'DELETE'}); toast('Mapping deleted'); loadMappings(); }
-  catch (e) { toast(e.message, true); }
-}
-
 function applyLogEvent(l) {
   if (currentStats) {
     currentStats.total_requests = (currentStats.total_requests || 0) + 1;

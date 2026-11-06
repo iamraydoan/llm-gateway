@@ -2,12 +2,9 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
-
-	"llm-gateway/internal/config"
 
 	_ "modernc.org/sqlite"
 )
@@ -54,136 +51,12 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_key_ts ON requests(key_id, ts DESC)`,
-		`CREATE TABLE IF NOT EXISTS keys (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL DEFAULT '',
-			api_key TEXT NOT NULL,
-			proxy TEXT NOT NULL DEFAULT '',
-			priority INTEGER NOT NULL DEFAULT 1,
-			max_concurrency INTEGER NOT NULL DEFAULT 0,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			rate_limits TEXT NOT NULL DEFAULT '[]',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS model_map (
-			requested TEXT PRIMARY KEY,
-			upstream TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
 			return nil, err
 		}
 	}
 	return s, nil
-}
-
-func (s *Store) UpsertKey(k config.Key) error {
-	rl, err := json.Marshal(k.RateLimits)
-	if err != nil {
-		return err
-	}
-	now := time.Now().Format(time.RFC3339)
-	_, err = s.db.Exec(`INSERT INTO keys
-		(id, name, api_key, proxy, priority, max_concurrency, enabled, rate_limits, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			name=excluded.name, api_key=excluded.api_key, proxy=excluded.proxy,
-			priority=excluded.priority, max_concurrency=excluded.max_concurrency,
-			enabled=excluded.enabled, rate_limits=excluded.rate_limits,
-			updated_at=excluded.updated_at`,
-		k.ID, k.Name, k.APIKey, k.Proxy, k.Priority, k.MaxConcurrency, boolToInt(k.Enabled), string(rl), now, now)
-	return err
-}
-
-func (s *Store) DeleteKey(id string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM keys WHERE id = ?`, id)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-func (s *Store) ListKeys() ([]config.Key, error) {
-	rows, err := s.db.Query(`SELECT id, name, api_key, proxy, priority,
-		max_concurrency, enabled, rate_limits FROM keys ORDER BY priority ASC, id ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []config.Key
-	for rows.Next() {
-		var k config.Key
-		var enabled int
-		var rlJSON string
-		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &k.Proxy, &k.Priority,
-			&k.MaxConcurrency, &enabled, &rlJSON); err != nil {
-			return nil, err
-		}
-		k.Enabled = enabled == 1
-		if err := json.Unmarshal([]byte(rlJSON), &k.RateLimits); err != nil {
-			return nil, fmt.Errorf("key %q: bad rate_limits: %w", k.ID, err)
-		}
-
-		for i := range k.RateLimits {
-			d, err := config.ParseWindowDuration(k.RateLimits[i].Window)
-			if err != nil {
-				return nil, fmt.Errorf("key %q: %w", k.ID, err)
-			}
-			k.RateLimits[i].Duration = d
-		}
-		out = append(out, k)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) KeyCount() (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM keys`).Scan(&n)
-	return n, err
-}
-
-func (s *Store) UpsertMapping(requested, upstream string) error {
-	now := time.Now().Format(time.RFC3339)
-	_, err := s.db.Exec(`INSERT INTO model_map (requested, upstream, updated_at)
-		VALUES (?, ?, ?) ON CONFLICT(requested) DO UPDATE SET
-		upstream=excluded.upstream, updated_at=excluded.updated_at`,
-		requested, upstream, now)
-	return err
-}
-
-func (s *Store) DeleteMapping(requested string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM model_map WHERE requested = ?`, requested)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-func (s *Store) ListMappings() (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT requested, upstream FROM model_map ORDER BY requested ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]string{}
-	for rows.Next() {
-		var req, up string
-		if err := rows.Scan(&req, &up); err != nil {
-			return nil, err
-		}
-		out[req] = up
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) MappingCount() (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM model_map`).Scan(&n)
-	return n, err
 }
 
 func (s *Store) Log(e *Entry) (int64, error) {
@@ -334,11 +207,11 @@ type KeyTokenStat struct {
 }
 
 func (s *Store) TokensByKey(since time.Time) ([]KeyTokenStat, error) {
-	rows, err := s.db.Query(`SELECT r.key_id, COALESCE(k.name, r.key_id),
+	rows, err := s.db.Query(`SELECT r.key_id, r.key_id,
 		COUNT(*), COALESCE(SUM(CASE WHEN r.status >= 400 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(r.prompt_tokens), 0), COALESCE(SUM(r.completion_tokens), 0),
 		COALESCE(SUM(r.total_tokens), 0)
-		FROM requests r LEFT JOIN keys k ON k.id = r.key_id
+		FROM requests r
 		WHERE r.ts >= ? GROUP BY r.key_id ORDER BY COUNT(*) DESC`,
 		since.Format(time.RFC3339Nano))
 	if err != nil {

@@ -4,14 +4,11 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"llm-gateway/internal/config"
 	"llm-gateway/internal/pool"
 	"llm-gateway/internal/store"
 )
@@ -56,6 +53,11 @@ func (g *Gateway) statsPayload(hours int) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	for i := range byKey {
+		if k := g.pool.Find(byKey[i].KeyID); k != nil {
+			byKey[i].KeyName = k.Name()
+		}
+	}
 	if byKey == nil {
 		byKey = []store.KeyTokenStat{}
 	}
@@ -83,6 +85,10 @@ func (g *Gateway) statsSnapshot(hours int) []byte {
 }
 
 func (g *Gateway) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
 	now := time.Now()
 	stats := make([]pool.Status, 0, len(g.pool.Keys()))
 	for _, k := range g.pool.Keys() {
@@ -115,282 +121,12 @@ func kStatusReason(k *pool.Key, now time.Time) string {
 	return "ready"
 }
 
-type keyInput struct {
-	ID             string                 `json:"id"`
-	Name           string                 `json:"name"`
-	APIKey         string                 `json:"api_key"`
-	Proxy          string                 `json:"proxy"`
-	Priority       int                    `json:"priority"`
-	MaxConcurrency int                    `json:"max_concurrency"`
-	Enabled        *bool                  `json:"enabled"`
-	RateLimits     []config.RateLimitRule `json:"rate_limits"`
-}
-
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
-
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = slugRe.ReplaceAllString(s, "-")
-	return strings.Trim(s, "-")
-}
-
-func (in *keyInput) toConfig(existing *config.Key) (config.Key, error) {
-	var k config.Key
-	if existing != nil {
-		k = *existing
-	}
-	if in.ID != "" {
-		k.ID = strings.TrimSpace(in.ID)
-	}
-	if k.ID == "" {
-		if s := slugify(in.Name); s != "" {
-			k.ID = s
-		} else {
-			k.ID = fmt.Sprintf("key-%d", time.Now().Unix())
-		}
-	}
-	if in.Name != "" {
-		k.Name = strings.TrimSpace(in.Name)
-	}
-	if k.Name == "" {
-		k.Name = k.ID
-	}
-
-	if in.APIKey != "" {
-		k.APIKey = in.APIKey
-	}
-	if k.APIKey == "" {
-		return k, fmt.Errorf("api_key is required")
-	}
-	k.Proxy = strings.TrimSpace(in.Proxy)
-	k.Priority = in.Priority
-	k.MaxConcurrency = in.MaxConcurrency
-	if in.Enabled != nil {
-		k.Enabled = *in.Enabled
-	} else if existing == nil {
-		k.Enabled = true
-	}
-	k.RateLimits = nil
-	for _, rl := range in.RateLimits {
-		if rl.Max <= 0 {
-			return k, fmt.Errorf("rate limit max must be > 0")
-		}
-		d, err := config.ParseWindowDuration(rl.Window)
-		if err != nil {
-			return k, fmt.Errorf("rate limit window %q: %w", rl.Window, err)
-		}
-		k.RateLimits = append(k.RateLimits, config.RateLimitRule{Max: rl.Max, Window: rl.Window, Duration: d})
-	}
-	return k, nil
-}
-
-func (g *Gateway) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
-	var in keyInput
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
-		return
-	}
-	k, err := in.toConfig(nil)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	if g.pool.Find(k.ID) != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "key id already exists: " + k.ID})
-		return
-	}
-	if err := g.store.UpsertKey(k); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if err := g.syncPool(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	g.hub.NotifyKeys()
-	writeJSON(w, http.StatusCreated, map[string]any{"id": k.ID, "name": k.Name})
-}
-
-func (g *Gateway) handleKeyUpdate(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing id query param"})
-		return
-	}
-	keys, err := g.store.ListKeys()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	var existing *config.Key
-	for i := range keys {
-		if keys[i].ID == id {
-			existing = &keys[i]
-			break
-		}
-	}
-	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "key not found: " + id})
-		return
-	}
-	var in keyInput
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
-		return
-	}
-
-	in.ID = id
-	k, err := in.toConfig(existing)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	if err := g.store.UpsertKey(k); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if err := g.syncPool(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	g.hub.NotifyKeys()
-	writeJSON(w, http.StatusOK, map[string]any{"id": k.ID, "name": k.Name})
-}
-
-func (g *Gateway) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing id query param"})
-		return
-	}
-	deleted, err := g.store.DeleteKey(id)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if !deleted {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "key not found: " + id})
-		return
-	}
-	if err := g.syncPool(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	g.hub.NotifyKeys()
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
-}
-
-func (g *Gateway) handleAPIKeyToggle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		return
-	}
-	id := r.URL.Query().Get("id")
-	enabledStr := r.URL.Query().Get("enabled")
-	k := g.pool.Find(id)
-	if k == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "key not found"})
-		return
-	}
-	enabled, err := strconv.ParseBool(enabledStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "enabled must be true/false"})
-		return
-	}
-	cfg := k.Config()
-	cfg.Enabled = enabled
-	if err := g.store.UpsertKey(cfg); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if err := g.syncPool(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	g.hub.NotifyKeys()
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled})
-}
-
-func (g *Gateway) handleAPIKeysRoute(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		g.handleAPIKeys(w, r)
-	case http.MethodPost:
-		g.handleKeyCreate(w, r)
-	case http.MethodPut:
-		g.handleKeyUpdate(w, r)
-	case http.MethodDelete:
-		g.handleKeyDelete(w, r)
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-	}
-}
-
 func (g *Gateway) handleAPIModelMap(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		m, err := g.store.ListMappings()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"model_map": m})
-	case http.MethodPost:
-		var in struct {
-			Requested string `json:"requested"`
-			Upstream  string `json:"upstream"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
-			return
-		}
-		in.Requested = strings.TrimSpace(in.Requested)
-		in.Upstream = strings.TrimSpace(in.Upstream)
-		if in.Requested == "" || in.Upstream == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "requested and upstream are required"})
-			return
-		}
-		if err := g.store.UpsertMapping(in.Requested, in.Upstream); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		if err := g.refreshModelMap(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"requested": in.Requested, "upstream": in.Upstream})
-	case http.MethodDelete:
-		req := r.URL.Query().Get("requested")
-		if req == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing requested query param"})
-			return
-		}
-		deleted, err := g.store.DeleteMapping(req)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		if !deleted {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": "mapping not found: " + req})
-			return
-		}
-		if err := g.refreshModelMap(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"requested": req, "deleted": true})
-	default:
+	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
 	}
-}
-
-func (g *Gateway) refreshModelMap() error {
-	m, err := g.store.ListMappings()
-	if err != nil {
-		return err
-	}
-	g.SetModelMap(m)
-	return nil
+	writeJSON(w, http.StatusOK, map[string]any{"model_map": g.ModelMap()})
 }
 
 func parseLogTime(v string, endOfDay bool) (time.Time, error) {
@@ -490,8 +226,7 @@ func (g *Gateway) Routes() http.Handler {
 	mux.HandleFunc("/v1/models", g.handleModels)
 
 	mux.HandleFunc("/", g.handleUI)
-	mux.HandleFunc("/api/keys", g.handleAPIKeysRoute)
-	mux.HandleFunc("/api/keys/toggle", g.handleAPIKeyToggle)
+	mux.HandleFunc("/api/keys", g.handleAPIKeys)
 	mux.HandleFunc("/api/model-map", g.handleAPIModelMap)
 	mux.HandleFunc("/api/logs", g.handleAPILogs)
 	mux.HandleFunc("/api/stats", g.handleAPIStats)

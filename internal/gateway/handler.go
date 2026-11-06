@@ -68,14 +68,6 @@ func (g *Gateway) ModelMap() map[string]string {
 	return out
 }
 
-func (g *Gateway) syncPool() error {
-	keys, err := g.store.ListKeys()
-	if err != nil {
-		return err
-	}
-	return g.pool.Sync(keys)
-}
-
 type requestLog struct {
 	keyID            string
 	modelRequested   string

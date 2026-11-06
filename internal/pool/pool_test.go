@@ -189,45 +189,10 @@ func TestParseResetDuration(t *testing.T) {
 	}
 }
 
-func TestSyncPreservesState(t *testing.T) {
-	p := testPool(t, []config.Key{
-		{ID: "k1", Name: "One", APIKey: "sk-1", Priority: 1, Enabled: true},
-	})
-
-	k1 := p.Find("k1")
-	k1.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
-	if err := p.Sync([]config.Key{
-		{ID: "k1", Name: "One-renamed", APIKey: "sk-1", Priority: 1, Enabled: true},
-		{ID: "k2", Name: "Two", APIKey: "sk-2", Priority: 2, Enabled: true},
-	}); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-
-	if got := p.Find("k1"); got == nil || got.Name() != "One-renamed" {
-		t.Fatalf("k1 should exist renamed, got %v", got)
-	}
-	k, rel, err := p.Acquire(context.Background())
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	if k.ID() != "k2" {
-		t.Fatalf("expected k2 (k1 still cooling down), got %s", k.ID())
-	}
-	rel()
-
-	if err := p.Sync([]config.Key{
-		{ID: "k2", Name: "Two", APIKey: "sk-2", Priority: 2, Enabled: true},
-	}); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if p.Find("k1") != nil {
-		t.Fatalf("k1 should be gone after sync")
-	}
-}
-
 func TestStatusChangeHook(t *testing.T) {
 	p := testPool(t, []config.Key{
 		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+		{ID: "k2", APIKey: "sk-2", Priority: 2, Enabled: true},
 	})
 	calls := 0
 	p.SetStatusChangeHook(func() { calls++ })
@@ -241,15 +206,9 @@ func TestStatusChangeHook(t *testing.T) {
 		t.Fatalf("expected hook after failure, got %d calls", calls)
 	}
 
-	if err := p.Sync([]config.Key{
-		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
-		{ID: "k2", APIKey: "sk-2", Priority: 2, Enabled: true},
-	}); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
 	p.Find("k2").ReportFailure(500, 0, false, time.Time{}, "server_error: internal error")
 	if calls != 3 {
-		t.Fatalf("expected hook for synced key, got %d calls", calls)
+		t.Fatalf("expected hook after k2 failure, got %d calls", calls)
 	}
 }
 

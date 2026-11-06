@@ -5,9 +5,8 @@
 // its reset time. Every request is logged to SQLite and shown on a
 // built-in dashboard.
 //
-// Keys and model mappings live in SQLite (gateway.db next to the config)
-// and are managed from the dashboard UI. The YAML config only seeds them
-// on first run, when the database is still empty.
+// Keys and model mappings come from config.yaml only (edit the file and
+// restart to change them). The SQLite database stores request logs only.
 package main
 
 import (
@@ -50,47 +49,18 @@ func main() {
 	}
 	defer st.Close()
 
-	if n, err := st.KeyCount(); err != nil {
-		log.Fatalf("store: %v", err)
-	} else if n == 0 && len(cfg.Keys) > 0 {
-		for _, k := range cfg.Keys {
-			if err := st.UpsertKey(k); err != nil {
-				log.Fatalf("seed key %q: %v", k.ID, err)
-			}
-		}
-		fmt.Printf("seeded %d keys from %s into %s\n", len(cfg.Keys), *configPath, dbPath)
+	if len(cfg.Keys) == 0 {
+		log.Fatalf("no keys: add some in config.yaml")
 	}
-	if n, err := st.MappingCount(); err != nil {
-		log.Fatalf("store: %v", err)
-	} else if n == 0 && len(cfg.ModelMap) > 0 {
-		for req, up := range cfg.ModelMap {
-			if err := st.UpsertMapping(req, up); err != nil {
-				log.Fatalf("seed mapping %q: %v", req, err)
-			}
-		}
-		fmt.Printf("seeded %d model mappings from %s\n", len(cfg.ModelMap), *configPath)
-	}
-
-	keys, err := st.ListKeys()
-	if err != nil {
-		log.Fatalf("store: %v", err)
-	}
-	if len(keys) == 0 {
-		log.Fatalf("no keys: add some in config.yaml or via the dashboard")
-	}
-	p, err := pool.NewFromKeys(keys, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+	p, err := pool.NewFromKeys(cfg.Keys, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
 	if err != nil {
 		log.Fatalf("pool: %v", err)
 	}
-	mappings, err := st.ListMappings()
-	if err != nil {
-		log.Fatalf("store: %v", err)
-	}
 
-	gw := gateway.New(cfg, p, st, mappings)
+	gw := gateway.New(cfg, p, st, cfg.ModelMap)
 	fmt.Printf("llm-gateway listening on %s\n", cfg.Server.Listen)
 	fmt.Printf("upstream: %s | keys: %d | dashboard: http://localhost%s/\n",
-		cfg.Upstream.BaseURL, len(keys), cfg.Server.Listen)
+		cfg.Upstream.BaseURL, len(cfg.Keys), cfg.Server.Listen)
 	if err := http.ListenAndServe(cfg.Server.Listen, gw.Routes()); err != nil {
 		fmt.Fprintln(os.Stderr, "server:", err)
 		os.Exit(1)

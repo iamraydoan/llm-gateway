@@ -36,23 +36,20 @@ multi-window rate limits.
   polling if the stream drops, plus a 30s full-stats safety refetch):
   - **Dashboard** — request/error/token cards, token usage per key
     (by key name), recent requests.
-  - **Keys** — key pool with names, live status, rate-limit bars, and
-    full CRUD from the UI: add / edit / delete / enable / disable.
-    Changes apply live without restart; in-flight state (cooldown,
-    quota reset, rate-limit history) is preserved across edits.
-    The **Last error** column shows the last upstream error attached to
-    each key (e.g. `rate_limit_exceeded: Rate limit reached`,
-    `insufficient_quota: ...`), with consecutive failure count and
-    retry countdown from the exponential backoff; it clears when the
-    key succeeds again.
+  - **Keys** — key pool with names, live status, rate-limit bars
+    (read-only; keys come from `config.yaml` — edit the file and
+    restart to change them). The **Last error** column shows the last
+    upstream response body attached to each key, with consecutive
+    failure count and retry countdown from the exponential backoff
+    (delay = max of backoff, Retry-After, quota reset wait); it clears
+    when the key succeeds again.
   - **Logs** — request log with date-range filter, key / model / status
     filters, errors-only toggle, and pagination (page size 25/50/100).
     New matching rows prepend live on page 1.
-  - **Model Map** — model mappings, add / update / delete from the UI.
+  - **Model Map** — model mappings (read-only, from `config.yaml`).
 
-Keys and model mappings live in SQLite. The YAML config only seeds them
-on first run (empty database); afterwards the dashboard is the source of
-truth. API keys are never shown in full in the UI (masked).
+Keys and model mappings live in `config.yaml` only. The SQLite database
+stores request logs only. API keys are never shown in full in the UI (masked).
 
 ## Endpoints (OpenAI-compatible)
 
@@ -63,9 +60,8 @@ truth. API keys are never shown in full in the UI (masked).
 | POST | `/v1/completions` | |
 | GET | `/v1/models` | lists mapped model names |
 | GET | `/` | dashboard |
-| GET / POST / PUT / DELETE | `/api/keys` | list / create / update / delete keys |
-| POST | `/api/keys/toggle?id=<id>&enabled=<bool>` | enable/disable a key |
-| GET / POST / DELETE | `/api/model-map` | list / upsert / delete mappings |
+| GET | `/api/keys` | list keys with live status (read-only) |
+| GET | `/api/model-map` | list mappings (read-only) |
 | GET | `/api/logs?from=&to=&key_id=&model=&status=&errors=&limit=&offset=` | filtered, paginated logs + total |
 | GET | `/api/events` | SSE stream: `log` / `keys` / `stats` realtime events |
 | GET | `/api/stats?hours=24` | aggregate counters + `tokens_by_key` |
@@ -141,7 +137,7 @@ keys:
 ## Tests
 
 ```bash
-go test ./...          # 30 tests: pool selection, rate limits, backoff, gateway
+go test ./...          # 27 tests: pool selection, rate limits, backoff, gateway
                        # passthrough (failover, quota, auth, streaming) and a
                        # 50-request integration test that audits the request log
                        # for concurrency and rate-limit compliance
@@ -165,7 +161,7 @@ quota-exhausted with a 5s reset, and serves streaming + usage normally.
 
 ```
 main.go                    entry: config -> store -> pool -> server
-internal/config/           YAML config + validation (seeds the DB on first run)
+internal/config/           YAML config + validation (keys and model map live here)
 internal/pool/             key pool: priority, semaphore, sliding windows,
                            cooldown/backoff, quota reset, per-key client+proxy,
                            live Sync() for dashboard edits
