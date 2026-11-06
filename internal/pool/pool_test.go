@@ -2,13 +2,16 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"llm-gateway/internal/config"
+	"llm-gateway/internal/store"
 )
 
 func testPool(t *testing.T, keys []config.Key) *Pool {
@@ -285,6 +288,126 @@ func TestCustomBackoff(t *testing.T) {
 	k.ReportFailure(429, 0, false, time.Time{}, "rate limited")
 	if secs := k.Status(now).RetryInSeconds; secs < 9 || secs > 10 {
 		t.Fatalf("4th failure retry = %ds, want ~10s (still capped)", secs)
+	}
+}
+
+func testPoolWithStore(t *testing.T, keys []config.Key) (*Pool, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	p := testPool(t, keys)
+	p.SetStore(st)
+	p.LoadState()
+	return p, st
+}
+
+func reopenPool(t *testing.T, keys []config.Key, st *store.Store) *Pool {
+	t.Helper()
+	p := testPool(t, keys)
+	p.SetStore(st)
+	p.LoadState()
+	return p
+}
+
+func TestPersistKeyState(t *testing.T) {
+	keys := []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+		{ID: "k2", APIKey: "sk-2", Priority: 2, Enabled: true},
+		{ID: "k3", APIKey: "sk-3", Priority: 3, Enabled: true},
+	}
+	p1, st := testPoolWithStore(t, keys)
+	p1.SetBackoff(5*time.Second, 2, 10*time.Minute)
+	k1 := p1.Find("k1")
+	k1.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	k1.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	states, err := st.LoadKeyStates()
+	if err != nil {
+		t.Fatalf("load states: %v", err)
+	}
+	if states["k1"].Fails != 2 {
+		t.Fatalf("db fails = %d, want 2", states["k1"].Fails)
+	}
+	if states["k1"].CooldownUntil.Before(time.Now()) {
+		t.Fatalf("db cooldown_until = %v, want a future time", states["k1"].CooldownUntil)
+	}
+	if _, ok := states["k2"]; !ok {
+		t.Fatal("db has no row for k2, want a row for every key")
+	}
+	k3 := p1.Find("k3")
+	k3.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	k3.ReportSuccess()
+	if states, err := st.LoadKeyStates(); err != nil || states["k3"].Fails != 0 || states["k3"].LastError != "" {
+		t.Fatalf("db k3 = %+v err %v, want fails 0 and empty last error", states["k3"], err)
+	}
+
+	p2 := reopenPool(t, keys, st)
+	p2.SetBackoff(5*time.Second, 2, 10*time.Minute)
+	rk1 := p2.Find("k1")
+	if st := rk1.Status(time.Now()); st.Fails != 2 {
+		t.Fatalf("reloaded fails = %d, want 2", st.Fails)
+	}
+	if rk1.skipReason(time.Now()) != "cooldown" {
+		t.Fatalf("reloaded skipReason = %q, want cooldown", rk1.skipReason(time.Now()))
+	}
+	k, rel, err := p2.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if k.ID() != "k2" {
+		t.Fatalf("acquire returned %s, want k2 (k1 still cooling down)", k.ID())
+	}
+	rel()
+}
+
+func TestPersistQuotaState(t *testing.T) {
+	keys := []config.Key{{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true}}
+	p1, st := testPoolWithStore(t, keys)
+	now := time.Now()
+	reset := now.Add(72 * time.Hour).UTC()
+	body := fmt.Sprintf(`{"error":{"message":"You've used this period's free allowance. Your next rolling 7-day period starts on %s. Use the paid model to keep going.","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`, reset.Format("2 Jan 2006 at 15:04 MST"))
+	p1.Find("k1").ReportFailure(429, 0, true, reset, body)
+	states, err := st.LoadKeyStates()
+	if err != nil {
+		t.Fatalf("load states: %v", err)
+	}
+	if states["k1"].QuotaResetAt.IsZero() {
+		t.Fatal("db quota_reset_at empty, want the reset date")
+	}
+
+	p2 := reopenPool(t, keys, st)
+	if st := p2.Find("k1").Status(now); st.QuotaResetAt == "" {
+		t.Fatal("reloaded QuotaResetAt empty, want the reset date")
+	}
+	if _, _, err := p2.Acquire(context.Background()); err == nil {
+		t.Fatal("acquire should fail while the key is quota-exhausted")
+	}
+}
+
+func TestPersistRateHits(t *testing.T) {
+	keys := []config.Key{{
+		ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true,
+		RateLimits: []config.RateLimitRule{{Max: 1, Window: "1h"}},
+	}}
+	p1, st := testPoolWithStore(t, keys)
+	if _, rel, err := p1.Acquire(context.Background()); err != nil {
+		t.Fatalf("acquire: %v", err)
+	} else {
+		rel()
+	}
+	hits, err := st.LoadRateHits("k1", 3600, time.Now().Add(-time.Hour))
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("db hits = %d err %v, want 1", len(hits), err)
+	}
+
+	p2 := reopenPool(t, keys, st)
+	if _, _, err := p2.Acquire(context.Background()); err == nil {
+		t.Fatal("acquire should fail, the 1/h unit is still spent after reload")
+	}
+	if p2.Find("k1").skipReason(time.Now()) != "rate-limited" {
+		t.Fatalf("skipReason = %q, want rate-limited", p2.Find("k1").skipReason(time.Now()))
 	}
 }
 

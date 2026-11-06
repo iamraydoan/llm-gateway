@@ -1396,6 +1396,93 @@ func TestGatewayBackoffConfig(t *testing.T) {
 	}
 }
 
+func TestRestartRestoresEnforcement(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	up.behaviors["tok-bad"] = errJSON(500, `{"error":{"message":"boom"}}`, nil)
+	up.behaviors["tok-good"] = okJSON(0)
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	buildGateway := func(t *testing.T, dbPath string, keys []config.Key, backoff config.Backoff) (*httptest.Server, *store.Store) {
+		t.Helper()
+		st, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("store open: %v", err)
+		}
+		cfg := &config.Config{}
+		cfg.Server.Listen = ":0"
+		cfg.Server.MaxFailovers = 10
+		cfg.Server.Backoff = backoff
+		cfg.Upstream.BaseURL = srv.URL
+		cfg.Upstream.TimeoutSeconds = 5
+		cfg.Keys = keys
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("config validate: %v", err)
+		}
+		p, err := pool.NewFromKeys(cfg.Keys, 5*time.Second)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		gw := New(cfg, p, st, nil)
+		gs := httptest.NewServer(gw.Routes())
+		return gs, st
+	}
+
+	t.Run("cooldown", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "gw.db")
+		keys := []config.Key{{ID: "only", APIKey: "tok-bad", Priority: 1, Enabled: true}}
+		backoff := config.Backoff{BaseSeconds: 30, Multiplier: 2, MaxSeconds: 600}
+		gw1, st1 := buildGateway(t, dbPath, keys, backoff)
+		if status, _ := postChat(t, client, gw1.URL, "gpt-4o-mini", false, ""); status != http.StatusInternalServerError {
+			t.Fatalf("1st status = %d, want 500", status)
+		}
+		gw1.Close()
+		if err := st1.Close(); err != nil {
+			t.Fatalf("store close: %v", err)
+		}
+		gw2, st2 := buildGateway(t, dbPath, keys, backoff)
+		defer gw2.Close()
+		defer st2.Close()
+		if status, _ := postChat(t, client, gw2.URL, "gpt-4o-mini", false, ""); status != http.StatusTooManyRequests {
+			t.Fatalf("after restart status = %d, want 429 (key still cooling down)", status)
+		}
+		row := keyRowByID(keysList(t, gw2.URL), "only")
+		if row["skip_reason"] != "cooldown" {
+			t.Fatalf("skip_reason = %v, want cooldown", row["skip_reason"])
+		}
+		if retry, _ := row["retry_in_seconds"].(float64); retry < 20 || retry > 30 {
+			t.Fatalf("retry_in_seconds = %v, want ~30s", retry)
+		}
+	})
+
+	t.Run("rate-limit", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "gw.db")
+		keys := []config.Key{{
+			ID: "rl", APIKey: "tok-good", Priority: 1, Enabled: true,
+			RateLimits: []config.RateLimitRule{{Max: 1, Window: "1h"}},
+		}}
+		gw1, st1 := buildGateway(t, dbPath, keys, config.Backoff{})
+		if status, _ := postChat(t, client, gw1.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+			t.Fatalf("1st status = %d, want 200", status)
+		}
+		gw1.Close()
+		if err := st1.Close(); err != nil {
+			t.Fatalf("store close: %v", err)
+		}
+		gw2, st2 := buildGateway(t, dbPath, keys, config.Backoff{})
+		defer gw2.Close()
+		defer st2.Close()
+		if status, _ := postChat(t, client, gw2.URL, "gpt-4o-mini", false, ""); status != http.StatusTooManyRequests {
+			t.Fatalf("after restart status = %d, want 429 (rate limit still spent)", status)
+		}
+		row := keyRowByID(keysList(t, gw2.URL), "rl")
+		if row["skip_reason"] != "rate-limited" {
+			t.Fatalf("skip_reason = %v, want rate-limited", row["skip_reason"])
+		}
+	})
+}
+
 const freeTierBody = `{"error":{"message":"You've used this period's free allowance. Your next rolling 7-day period starts on 10 Nov 2026 at 02:38 UTC. Use the paid model 'deepseek-v4-flash' to keep going, or subscribe to a Token Harbor Pass for a recurring included allowance across more models. https://tokenharbor.ai/pricing","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`
 
 func TestFreeTierQuotaReset(t *testing.T) {

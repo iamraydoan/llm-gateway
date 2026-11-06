@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"llm-gateway/internal/config"
+	"llm-gateway/internal/store"
 )
 
 const (
@@ -111,6 +113,8 @@ type Key struct {
 	// notify is called (after unlocking) when the key's live state changes
 	// (success / failure). Set by the pool; used for realtime pushes.
 	notify func()
+
+	store *store.Store
 
 	// one http.Client per key so each key can use its own proxy
 	client *http.Client
@@ -302,6 +306,55 @@ func (k *Key) ExtendCooldown(d time.Duration) {
 	if notify != nil {
 		notify()
 	}
+	k.persistState()
+}
+
+func (k *Key) persistState() {
+	k.mu.Lock()
+	s := k.store
+	snap := store.KeyState{
+		KeyID:         k.cfg.ID,
+		Fails:         k.fails,
+		CooldownUntil: k.cooldownUntil,
+		QuotaResetAt:  k.quotaResetAt,
+		LastError:     k.LastError,
+		LastErrorAt:   k.LastErrorAt,
+	}
+	k.mu.Unlock()
+	if s == nil {
+		return
+	}
+	if err := s.SaveKeyState(snap); err != nil {
+		fmt.Fprintln(os.Stderr, "pool: save key state:", err)
+	}
+}
+
+func (k *Key) persistAcquire(now time.Time) {
+	k.mu.Lock()
+	s := k.store
+	windows := make([]time.Duration, 0, len(k.windows))
+	for _, w := range k.windows {
+		windows = append(windows, w.duration)
+	}
+	k.mu.Unlock()
+	if s == nil {
+		return
+	}
+	for _, d := range windows {
+		if err := s.SaveRateHit(k.cfg.ID, int64(d/time.Second), now); err != nil {
+			fmt.Fprintln(os.Stderr, "pool: save rate hit:", err)
+		}
+	}
+}
+
+func (k *Key) applyState(st store.KeyState) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.fails = st.Fails
+	k.cooldownUntil = st.CooldownUntil
+	k.quotaResetAt = st.QuotaResetAt
+	k.LastError = st.LastError
+	k.LastErrorAt = st.LastErrorAt
 }
 
 func (k *Key) ReportSuccess() {
@@ -315,6 +368,7 @@ func (k *Key) ReportSuccess() {
 	if notify != nil {
 		notify()
 	}
+	k.persistState()
 }
 
 func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted bool, quotaReset time.Time, detail string) {
@@ -348,6 +402,7 @@ func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted
 	if notify != nil {
 		notify()
 	}
+	k.persistState()
 }
 
 func (k *Key) backoffDelay(fails int) time.Duration {
@@ -438,6 +493,7 @@ type Pool struct {
 	mu      sync.RWMutex
 	keys    []*Key
 	timeout time.Duration
+	store   *store.Store
 
 	onStatusChange func()
 }
@@ -450,6 +506,59 @@ func (p *Pool) SetStatusChangeHook(fn func()) {
 		k.mu.Lock()
 		k.notify = fn
 		k.mu.Unlock()
+	}
+}
+
+func (p *Pool) SetStore(s *store.Store) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.store = s
+	for _, k := range p.keys {
+		k.mu.Lock()
+		k.store = s
+		k.mu.Unlock()
+	}
+}
+
+func (p *Pool) LoadState() {
+	p.mu.RLock()
+	s := p.store
+	keys := append([]*Key(nil), p.keys...)
+	p.mu.RUnlock()
+	if s == nil {
+		return
+	}
+	now := time.Now()
+	states, err := s.LoadKeyStates()
+	if err != nil {
+		return
+	}
+	maxWindow := time.Duration(0)
+	for _, k := range keys {
+		if st, ok := states[k.ID()]; ok {
+			k.applyState(st)
+		}
+		for _, w := range k.windows {
+			if w.duration > maxWindow {
+				maxWindow = w.duration
+			}
+		}
+		k.persistState()
+	}
+	if maxWindow == 0 {
+		return
+	}
+	_ = s.DeleteRateHitsBefore(now.Add(-maxWindow))
+	for _, k := range keys {
+		for _, w := range k.windows {
+			hits, err := s.LoadRateHits(k.ID(), int64(w.duration/time.Second), now.Add(-w.duration))
+			if err != nil {
+				continue
+			}
+			k.mu.Lock()
+			w.hits = hits
+			k.mu.Unlock()
+		}
 	}
 }
 
@@ -535,6 +644,7 @@ func (p *Pool) Acquire(ctx context.Context) (*Key, func(), error) {
 	var earliest time.Time
 	for _, k := range p.snapshot() {
 		if release := k.tryReserve(now); release != nil {
+			k.persistAcquire(now)
 			return k, release, nil
 		}
 		if r := k.skipReason(now); r != "" {

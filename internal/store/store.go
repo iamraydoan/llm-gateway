@@ -53,6 +53,21 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_key_ts ON requests(key_id, ts DESC)`,
+		`CREATE TABLE IF NOT EXISTS key_state (
+			key_id TEXT PRIMARY KEY,
+			fails INTEGER NOT NULL DEFAULT 0,
+			cooldown_until TEXT NOT NULL DEFAULT '',
+			quota_reset_at TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			last_error_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS key_rate_hits (
+			key_id TEXT NOT NULL,
+			window_seconds INTEGER NOT NULL,
+			ts TEXT NOT NULL,
+			PRIMARY KEY (key_id, window_seconds, ts)
+		)`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
 			return nil, err
@@ -291,6 +306,97 @@ func (s *Store) CountsByKeySince(since time.Time) (map[string]int, error) {
 type LastKeyError struct {
 	Error string
 	TS    string
+}
+
+type KeyState struct {
+	KeyID         string
+	Fails         int
+	CooldownUntil time.Time
+	QuotaResetAt  time.Time
+	LastError     string
+	LastErrorAt   time.Time
+}
+
+func encodeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339Nano)
+}
+
+func parseTime(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s)
+	return t
+}
+
+func (s *Store) SaveKeyState(st KeyState) error {
+	_, err := s.db.Exec(`INSERT INTO key_state
+		(key_id, fails, cooldown_until, quota_reset_at, last_error, last_error_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key_id) DO UPDATE SET
+			fails = excluded.fails,
+			cooldown_until = excluded.cooldown_until,
+			quota_reset_at = excluded.quota_reset_at,
+			last_error = excluded.last_error,
+			last_error_at = excluded.last_error_at,
+			updated_at = excluded.updated_at`,
+		st.KeyID, st.Fails, encodeTime(st.CooldownUntil), encodeTime(st.QuotaResetAt),
+		st.LastError, encodeTime(st.LastErrorAt), time.Now().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) LoadKeyStates() (map[string]KeyState, error) {
+	rows, err := s.db.Query(`SELECT key_id, fails, cooldown_until, quota_reset_at, last_error, last_error_at
+		FROM key_state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]KeyState{}
+	for rows.Next() {
+		var st KeyState
+		var cooldown, quota, lastErrAt string
+		if err := rows.Scan(&st.KeyID, &st.Fails, &cooldown, &quota, &st.LastError, &lastErrAt); err != nil {
+			return nil, err
+		}
+		st.CooldownUntil = parseTime(cooldown)
+		st.QuotaResetAt = parseTime(quota)
+		st.LastErrorAt = parseTime(lastErrAt)
+		out[st.KeyID] = st
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveRateHit(keyID string, windowSeconds int64, ts time.Time) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO key_rate_hits (key_id, window_seconds, ts)
+		VALUES (?, ?, ?)`, keyID, windowSeconds, ts.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) LoadRateHits(keyID string, windowSeconds int64, since time.Time) ([]time.Time, error) {
+	rows, err := s.db.Query(`SELECT ts FROM key_rate_hits
+		WHERE key_id = ? AND window_seconds = ? AND ts >= ? ORDER BY ts ASC`,
+		keyID, windowSeconds, since.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []time.Time
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if t := parseTime(raw); !t.IsZero() {
+			out = append(out, t)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteRateHitsBefore(t time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM key_rate_hits WHERE ts < ?`, t.Format(time.RFC3339Nano))
+	return err
 }
 
 func (s *Store) LastKeyErrors() (map[string]LastKeyError, error) {

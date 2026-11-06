@@ -59,6 +59,8 @@ func New(cfg *config.Config, p *pool.Pool, s *store.Store, modelMap map[string]s
 		cfg.Server.Backoff.Multiplier,
 		time.Duration(cfg.Server.Backoff.MaxSeconds)*time.Second,
 	)
+	p.SetStore(s)
+	p.LoadState()
 	p.SetStatusChangeHook(func() { g.hub.NotifyKeys() })
 	return g
 }
