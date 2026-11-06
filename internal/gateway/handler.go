@@ -269,6 +269,17 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var noKey *pool.ErrNoKeyAvailable
 			if errors.As(err, &noKey) {
+				if lastErr != nil {
+					if lastErr.retryAfter == 0 && noKey.RetryAfter > 0 {
+						w.Header().Set("Retry-After", fmt.Sprintf("%d", int(noKey.RetryAfter.Seconds())))
+					}
+					proxyErrorBody(w, lastErr)
+					lg.keyID = ""
+					lg.status = lastErr.status
+					lg.errMsg = strings.TrimSpace(string(lastErr.body))
+					g.finishLog(lg)
+					return
+				}
 				if noKey.RetryAfter > 0 {
 					w.Header().Set("Retry-After", fmt.Sprintf("%d", int(noKey.RetryAfter.Seconds())))
 				}

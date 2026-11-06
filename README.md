@@ -37,7 +37,10 @@ multi-window rate limits.
   (no delay-and-retry). `server.max_failovers` (default 10) caps how many
   keys one request may jump across. Every upstream attempt is logged as
   its own line, so a request that fails on key 1 and succeeds on key 2
-  leaves two log lines.
+  leaves two log lines. When the failover budget runs out (or no key is
+  left to try), the gateway returns the **last upstream error verbatim**
+  — its status and raw body — instead of a generic gateway message.
+  Network-only failures return 502 with the last network error.
 - **Model mapping** — `model_map` rewrites requested model names to
   upstream names (`cheap` → `gpt-4o-mini`).
 - **Request log + dashboard** — every upstream attempt is logged to

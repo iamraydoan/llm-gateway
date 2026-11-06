@@ -598,8 +598,8 @@ func TestPassthroughQuotaKeySkipped(t *testing.T) {
 
 func TestPassthroughAllKeysFail(t *testing.T) {
 	up := newFakeUpstream()
-	up.behaviors["tok-a"] = errJSON(429, `{"error":{"message":"limited","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "30"})
-	up.behaviors["tok-b"] = errJSON(429, `{"error":{"message":"limited","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "30"})
+	up.behaviors["tok-a"] = errJSON(429, `{"error":{"message":"limited-a","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "30"})
+	up.behaviors["tok-b"] = errJSON(429, `{"error":{"message":"limited-b","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "30"})
 	srv := httptest.NewServer(up)
 	defer srv.Close()
 	gw, st := newTestGateway(t, srv.URL, []config.Key{
@@ -608,9 +608,15 @@ func TestPassthroughAllKeysFail(t *testing.T) {
 	}, nil, "")
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	status, body := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", status)
+	}
+	if !strings.Contains(string(body), "limited-b") || strings.Contains(string(body), "limited-a") {
+		t.Fatalf("body = %s, want the LAST upstream error (limited-b) verbatim", body)
+	}
+	if up.receivedCount("tok-a") != 1 || up.receivedCount("tok-b") != 1 {
+		t.Fatalf("upstream calls a=%d b=%d, want 1/1 (each key tried once, no extra retries)", up.receivedCount("tok-a"), up.receivedCount("tok-b"))
 	}
 	logs := readAllLogs(t, st)
 	if len(logs) != 2 || logs[0].Status != 429 || logs[1].Status != 429 {
@@ -618,6 +624,33 @@ func TestPassthroughAllKeysFail(t *testing.T) {
 	}
 	if got := keyIDs(logs); got[0] != "a" || got[1] != "b" {
 		t.Fatalf("log keys = %v, want [a b]", got)
+	}
+}
+
+func TestPassthroughAcquireExhaustedReturnsLastError(t *testing.T) {
+	up := newFakeUpstream()
+	up.behaviors["tok-a"] = errJSON(429, `{"error":{"message":"limited-a","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "60"})
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "a", APIKey: "tok-a", Priority: 1, Enabled: true},
+		{ID: "b", APIKey: "tok-b", Priority: 2, Enabled: false},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	status, body := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", status)
+	}
+	if !strings.Contains(string(body), "limited-a") {
+		t.Fatalf("body = %s, want last upstream error (limited-a), not generic no-keys message", body)
+	}
+	if up.receivedCount("tok-a") != 1 || up.receivedCount("tok-b") != 0 {
+		t.Fatalf("upstream calls a=%d b=%d, want 1/0", up.receivedCount("tok-a"), up.receivedCount("tok-b"))
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 2 || logs[0].Status != 429 || logs[1].Status != 429 {
+		t.Fatalf("log = %+v, want 2 entries with status 429", logs)
 	}
 }
 
