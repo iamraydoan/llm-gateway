@@ -18,6 +18,7 @@ type Entry struct {
 	Status           int    `json:"status"`
 	LatencyMs        int64  `json:"latency_ms"`
 	PromptTokens     int    `json:"prompt_tokens"`
+	CachedTokens     int    `json:"cached_tokens"`
 	CompletionTokens int    `json:"completion_tokens"`
 	TotalTokens      int    `json:"total_tokens"`
 	Stream           bool   `json:"stream"`
@@ -44,6 +45,7 @@ func Open(path string) (*Store, error) {
 			status INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			cached_tokens INTEGER NOT NULL DEFAULT 0,
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
 			stream INTEGER NOT NULL DEFAULT 0,
@@ -56,6 +58,9 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -66,10 +71,10 @@ func (s *Store) Log(e *Entry) (int64, error) {
 	}
 	res, err := s.db.Exec(`INSERT INTO requests
 		(ts, key_id, model_requested, model_upstream, status, latency_ms,
-		 prompt_tokens, completion_tokens, total_tokens, stream, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 prompt_tokens, cached_tokens, completion_tokens, total_tokens, stream, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.TS, e.KeyID, e.ModelRequested, e.ModelUpstream, e.Status, e.LatencyMs,
-		e.PromptTokens, e.CompletionTokens, e.TotalTokens, stream, e.Error)
+		e.PromptTokens, e.CachedTokens, e.CompletionTokens, e.TotalTokens, stream, e.Error)
 	if err != nil {
 		return 0, err
 	}
@@ -122,7 +127,7 @@ func (s *Store) Recent(f LogFilter, limit, offset int) ([]Entry, error) {
 	where, args := f.where()
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(`SELECT id, ts, key_id, model_requested, model_upstream,
-		status, latency_ms, prompt_tokens, completion_tokens, total_tokens, stream, error
+		status, latency_ms, prompt_tokens, cached_tokens, completion_tokens, total_tokens, stream, error
 		FROM requests `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
@@ -133,7 +138,7 @@ func (s *Store) Recent(f LogFilter, limit, offset int) ([]Entry, error) {
 		var e Entry
 		var stream int
 		if err := rows.Scan(&e.ID, &e.TS, &e.KeyID, &e.ModelRequested, &e.ModelUpstream,
-			&e.Status, &e.LatencyMs, &e.PromptTokens, &e.CompletionTokens, &e.TotalTokens, &stream, &e.Error); err != nil {
+			&e.Status, &e.LatencyMs, &e.PromptTokens, &e.CachedTokens, &e.CompletionTokens, &e.TotalTokens, &stream, &e.Error); err != nil {
 			return nil, err
 		}
 		e.Stream = stream == 1
@@ -150,12 +155,15 @@ func (s *Store) CountLogs(f LogFilter) (int, error) {
 }
 
 type Stats struct {
-	TotalRequests int            `json:"total_requests"`
-	TotalErrors   int            `json:"total_errors"`
-	TotalTokens   int            `json:"total_tokens"`
-	ByKey         map[string]int `json:"by_key"`
-	ByModel       map[string]int `json:"by_model"`
-	ByStatus      map[string]int `json:"by_status"`
+	TotalRequests         int            `json:"total_requests"`
+	TotalErrors           int            `json:"total_errors"`
+	TotalTokens           int            `json:"total_tokens"`
+	TotalPromptTokens     int            `json:"total_prompt_tokens"`
+	TotalCachedTokens     int            `json:"total_cached_tokens"`
+	TotalCompletionTokens int            `json:"total_completion_tokens"`
+	ByKey                 map[string]int `json:"by_key"`
+	ByModel               map[string]int `json:"by_model"`
+	ByStatus              map[string]int `json:"by_status"`
 }
 
 func (s *Store) StatsSince(since time.Time) (Stats, error) {
@@ -165,9 +173,11 @@ func (s *Store) StatsSince(since time.Time) (Stats, error) {
 		ByStatus: map[string]int{},
 	}
 	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(total_tokens), 0) FROM requests WHERE ts >= ?`,
+		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM requests WHERE ts >= ?`,
 		since.Format(time.RFC3339Nano))
-	if err := row.Scan(&st.TotalRequests, &st.TotalErrors, &st.TotalTokens); err != nil {
+	if err := row.Scan(&st.TotalRequests, &st.TotalErrors, &st.TotalTokens,
+		&st.TotalPromptTokens, &st.TotalCachedTokens, &st.TotalCompletionTokens); err != nil {
 		return st, fmt.Errorf("stats: %w", err)
 	}
 	for _, q := range []struct {
@@ -202,6 +212,7 @@ type KeyTokenStat struct {
 	Requests         int    `json:"requests"`
 	Errors           int    `json:"errors"`
 	PromptTokens     int    `json:"prompt_tokens"`
+	CachedTokens     int    `json:"cached_tokens"`
 	CompletionTokens int    `json:"completion_tokens"`
 	TotalTokens      int    `json:"total_tokens"`
 }
@@ -209,8 +220,8 @@ type KeyTokenStat struct {
 func (s *Store) TokensByKey(since time.Time) ([]KeyTokenStat, error) {
 	rows, err := s.db.Query(`SELECT r.key_id, r.key_id,
 		COUNT(*), COALESCE(SUM(CASE WHEN r.status >= 400 THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(r.prompt_tokens), 0), COALESCE(SUM(r.completion_tokens), 0),
-		COALESCE(SUM(r.total_tokens), 0)
+		COALESCE(SUM(r.prompt_tokens), 0), COALESCE(SUM(r.cached_tokens), 0),
+		COALESCE(SUM(r.completion_tokens), 0), COALESCE(SUM(r.total_tokens), 0)
 		FROM requests r
 		WHERE r.ts >= ? GROUP BY r.key_id ORDER BY COUNT(*) DESC`,
 		since.Format(time.RFC3339Nano))
@@ -222,7 +233,7 @@ func (s *Store) TokensByKey(since time.Time) ([]KeyTokenStat, error) {
 	for rows.Next() {
 		var st KeyTokenStat
 		if err := rows.Scan(&st.KeyID, &st.KeyName, &st.Requests, &st.Errors,
-			&st.PromptTokens, &st.CompletionTokens, &st.TotalTokens); err != nil {
+			&st.PromptTokens, &st.CachedTokens, &st.CompletionTokens, &st.TotalTokens); err != nil {
 			return nil, err
 		}
 		out = append(out, st)

@@ -86,7 +86,8 @@ func okJSON(delay time.Duration) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "chatcmpl-test", "object": "chat.completion", "model": model,
 			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "hi"}}},
-			"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+				"prompt_tokens_details": map[string]any{"cached_tokens": 4}},
 		})
 	}
 }
@@ -109,7 +110,7 @@ func streamOK() http.HandlerFunc {
 		fl, _ := w.(http.Flusher)
 		fmt.Fprintln(w, `data: {"id":"x","choices":[{"delta":{"content":"hel"}}]}`)
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, `data: {"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		fmt.Fprintln(w, `data: {"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":4}}}`)
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "data: [DONE]")
 		fmt.Fprintln(w)
@@ -187,6 +188,20 @@ func readAllLogs(t *testing.T, st *store.Store) []store.Entry {
 	return entries
 }
 
+func statsPayload(t *testing.T, srvURL string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(srvURL + "/api/stats")
+	if err != nil {
+		t.Fatalf("stats get: %v", err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("stats decode: %v", err)
+	}
+	return out
+}
+
 func keyIDs(entries []store.Entry) []string {
 	out := make([]string, len(entries))
 	for i, e := range entries {
@@ -224,8 +239,21 @@ func TestPassthroughRoutesFirstKeyAndMapsModel(t *testing.T) {
 	if e.KeyID != "good" || e.ModelRequested != "cheap" || e.ModelUpstream != "gpt-4o-mini" {
 		t.Fatalf("log = %+v, want key good cheap->gpt-4o-mini", e)
 	}
-	if e.Status != 200 || e.TotalTokens != 15 || e.PromptTokens != 10 || e.CompletionTokens != 5 {
-		t.Fatalf("log status/tokens = %d/%d, want 200/15", e.Status, e.TotalTokens)
+	if e.Status != 200 || e.TotalTokens != 15 || e.PromptTokens != 10 || e.CachedTokens != 4 || e.CompletionTokens != 5 {
+		t.Fatalf("log status/tokens = %d/%d/%d, want 200/15/4", e.Status, e.TotalTokens, e.CachedTokens)
+	}
+	stats := statsPayload(t, gw.URL)
+	if stats["total_prompt_tokens"] != float64(10) || stats["total_cached_tokens"] != float64(4) ||
+		stats["total_completion_tokens"] != float64(5) || stats["total_tokens"] != float64(15) {
+		t.Fatalf("stats tokens = %+v, want prompt 10 cached 4 completion 5 total 15", stats)
+	}
+	byKey, ok := stats["tokens_by_key"].([]any)
+	if !ok || len(byKey) != 1 {
+		t.Fatalf("tokens_by_key = %+v, want 1 row", stats["tokens_by_key"])
+	}
+	row := byKey[0].(map[string]any)
+	if row["cached_tokens"] != float64(4) || row["prompt_tokens"] != float64(10) {
+		t.Fatalf("tokens_by_key row = %+v, want cached 4 prompt 10", row)
 	}
 }
 
@@ -393,7 +421,7 @@ func TestPassthroughStreaming(t *testing.T) {
 		t.Fatalf("stream body missing chunks/DONE: %s", body)
 	}
 	logs := readAllLogs(t, st)
-	if len(logs) != 1 || !logs[0].Stream || logs[0].TotalTokens != 15 {
+	if len(logs) != 1 || !logs[0].Stream || logs[0].TotalTokens != 15 || logs[0].CachedTokens != 4 {
 		t.Fatalf("log = %+v, want 1 streaming entry with 15 tokens", logs)
 	}
 }

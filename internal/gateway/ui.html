@@ -91,13 +91,15 @@
       <div class="cards">
         <div class="card"><div class="label">Requests (24h)</div><div class="value" id="st-total">–</div></div>
         <div class="card"><div class="label">Errors (24h)</div><div class="value" id="st-errors">–</div></div>
-        <div class="card"><div class="label">Tokens (24h)</div><div class="value" id="st-tokens">–</div></div>
+        <div class="card"><div class="label">Input tokens (24h)</div><div class="value" id="st-input">–</div></div>
+        <div class="card"><div class="label">Cached tokens (24h)</div><div class="value" id="st-cached">–</div></div>
+        <div class="card"><div class="label">Output tokens (24h)</div><div class="value" id="st-output">–</div></div>
         <div class="card"><div class="label">Keys ready</div><div class="value" id="st-ready">–</div></div>
         <div class="card"><div class="label">Keys in flight</div><div class="value" id="st-flight">–</div></div>
       </div>
       <h3>Token usage by key (24h)</h3>
       <table id="tokens-by-key">
-        <thead><tr><th>Key</th><th>Requests</th><th>Errors</th><th>Prompt tokens</th><th>Completion tokens</th><th>Total tokens</th></tr></thead>
+        <thead><tr><th>Key</th><th>Requests</th><th>Errors</th><th>Prompt tokens</th><th>Cached tokens</th><th>Completion tokens</th><th>Total tokens</th></tr></thead>
         <tbody></tbody>
       </table>
       <h3>Recent requests</h3>
@@ -232,13 +234,15 @@ function renderStats(stats) {
   currentStats = stats;
   $('#st-total').textContent = stats.total_requests ?? 0;
   $('#st-errors').textContent = stats.total_errors ?? 0;
-  $('#st-tokens').textContent = (stats.total_tokens ?? 0).toLocaleString();
+  $('#st-input').textContent = (stats.total_prompt_tokens ?? 0).toLocaleString();
+  $('#st-cached').textContent = (stats.total_cached_tokens ?? 0).toLocaleString();
+  $('#st-output').textContent = (stats.total_completion_tokens ?? 0).toLocaleString();
   $('#tokens-by-key tbody').innerHTML = (stats.tokens_by_key || []).map(t => `<tr data-key="${esc(t.key_id)}">
     <td><strong>${esc(t.key_name)}</strong> <span class="muted mono">${esc(t.key_id)}</span></td>
     <td class="c-req">${t.requests}</td><td class="c-err ${t.errors ? 'err' : ''}">${t.errors}</td>
-    <td class="c-pt">${t.prompt_tokens.toLocaleString()}</td><td class="c-ct">${t.completion_tokens.toLocaleString()}</td>
+    <td class="c-pt">${t.prompt_tokens.toLocaleString()}</td><td class="c-cached">${(t.cached_tokens || 0).toLocaleString()}</td><td class="c-ct">${t.completion_tokens.toLocaleString()}</td>
     <td class="c-tt"><strong>${t.total_tokens.toLocaleString()}</strong></td></tr>`).join('')
-    || '<tr><td colspan="6" class="muted">no requests in the last 24h</td></tr>';
+    || '<tr><td colspan="7" class="muted">no requests in the last 24h</td></tr>';
 }
 async function loadDashboard() {
   const [stats, logs] = await Promise.all([api('/api/stats'), api('/api/logs?limit=10')]);
@@ -328,15 +332,21 @@ function applyLogEvent(l) {
     currentStats.total_requests = (currentStats.total_requests || 0) + 1;
     if (l.status >= 400) currentStats.total_errors = (currentStats.total_errors || 0) + 1;
     currentStats.total_tokens = (currentStats.total_tokens || 0) + (l.total_tokens || 0);
+    currentStats.total_prompt_tokens = (currentStats.total_prompt_tokens || 0) + (l.prompt_tokens || 0);
+    currentStats.total_cached_tokens = (currentStats.total_cached_tokens || 0) + (l.cached_tokens || 0);
+    currentStats.total_completion_tokens = (currentStats.total_completion_tokens || 0) + (l.completion_tokens || 0);
     $('#st-total').textContent = currentStats.total_requests;
     $('#st-errors').textContent = currentStats.total_errors;
-    $('#st-tokens').textContent = currentStats.total_tokens.toLocaleString();
+    $('#st-input').textContent = currentStats.total_prompt_tokens.toLocaleString();
+    $('#st-cached').textContent = currentStats.total_cached_tokens.toLocaleString();
+    $('#st-output').textContent = currentStats.total_completion_tokens.toLocaleString();
     const row = document.querySelector(`#tokens-by-key tr[data-key="${CSS.escape(l.key_id)}"]`);
     if (row) {
       const bump = (sel, n) => { const el = row.querySelector(sel); if (el) el.textContent = (parseInt(el.textContent.replace(/,/g, ''), 10) || 0) + n; };
       bump('.c-req', 1);
       if (l.status >= 400) bump('.c-err', 1);
       bump('.c-pt', l.prompt_tokens || 0);
+      bump('.c-cached', l.cached_tokens || 0);
       bump('.c-ct', l.completion_tokens || 0);
       bump('.c-tt', l.total_tokens || 0);
     } else if (l.key_id) {

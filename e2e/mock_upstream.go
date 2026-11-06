@@ -51,7 +51,7 @@ func main() {
 			for _, chunk := range []string{
 				`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"},"index":0}]}`,
 				`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[{"delta":{"content":" world"},"index":0}]}`,
-				`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+				`{"id":"chatcmpl-mock","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":4}}}`,
 			} {
 				fmt.Fprintf(w, "data: %s\n\n", chunk)
 				fl.Flush()
@@ -75,7 +75,8 @@ func main() {
 				},
 				"finish_reason": "stop",
 			}},
-			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+				"prompt_tokens_details": map[string]any{"cached_tokens": 4}},
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	})

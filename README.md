@@ -22,20 +22,28 @@ multi-window rate limits.
   `insufficient_quota` / `quota_exceeded` (and OpenAI's
   `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` headers) mark
   the key out until its reset time. No calls are sent to it before then.
-- **Failover** — on 429 / 5xx / network error the gateway blacklists the
-  key and retries the next key in the pool, transparently.
+- **Failover** — on 429 / any 4xx / 5xx / network error the key goes into
+  cooldown backoff and the request jumps to the next key immediately
+  (no delay-and-retry). `server.max_failovers` (default 10) caps how many
+  keys one request may jump across. Every upstream attempt is logged as
+  its own line, so a request that fails on key 1 and succeeds on key 2
+  leaves two log lines.
 - **Model mapping** — `model_map` rewrites requested model names to
   upstream names (`cheap` → `gpt-4o-mini`).
-- **Request log + dashboard** — every request is logged to SQLite
-  (`gateway.db` next to the config) with key, models, status, latency and
-  token usage (including streaming usage when the upstream sends it).
+- **Request log + dashboard** — every upstream attempt is logged to
+  SQLite (`gateway.db` next to the config) with key, models, status,
+  latency and token usage (including streaming usage when the upstream
+  sends it). Token usage is split into input (`prompt_tokens`), cached
+  (`prompt_tokens_details.cached_tokens`) and output (`completion_tokens`),
+  stored per request and summed in the dashboard.
   The dashboard at `http://localhost:8080/` has four pages, all **realtime**
   over SSE (`GET /api/events`): new requests appear instantly, counters
   tick up live, and key status badges change the moment a key is
   blacklisted or recovers (sidebar shows ● LIVE; falls back to 5s
   polling if the stream drops, plus a 30s full-stats safety refetch):
-  - **Dashboard** — request/error/token cards, token usage per key
-    (by key name), recent requests.
+  - **Dashboard** — request/error cards plus token cards split into
+    Input / Cached / Output tokens, token usage per key (by key name,
+    with a Cached column), recent requests.
   - **Keys** — key pool with names, live status, rate-limit bars
     (read-only; keys come from `config.yaml` — edit the file and
     restart to change them). The **Last error** column shows the last
@@ -110,6 +118,7 @@ variable (the compose file uses the env var to point at the volume).
 server:
   listen: ":8080"
   master_key: ""          # optional client auth, empty = none
+  max_failovers: 10       # max key jumps per request, default 10
 
 upstream:
   base_url: "https://api.openai.com"
@@ -137,7 +146,7 @@ keys:
 ## Tests
 
 ```bash
-go test ./...          # 27 tests: pool selection, rate limits, backoff, gateway
+go test ./...          # 30 tests: pool selection, rate limits, backoff, gateway
                        # passthrough (failover, quota, auth, streaming) and a
                        # 50-request integration test that audits the request log
                        # for concurrency and rate-limit compliance

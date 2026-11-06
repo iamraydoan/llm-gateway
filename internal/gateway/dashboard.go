@@ -62,13 +62,16 @@ func (g *Gateway) statsPayload(hours int) (map[string]any, error) {
 		byKey = []store.KeyTokenStat{}
 	}
 	return map[string]any{
-		"total_requests": st.TotalRequests,
-		"total_errors":   st.TotalErrors,
-		"total_tokens":   st.TotalTokens,
-		"by_key":         st.ByKey,
-		"by_model":       st.ByModel,
-		"by_status":      st.ByStatus,
-		"tokens_by_key":  byKey,
+		"total_requests":          st.TotalRequests,
+		"total_errors":            st.TotalErrors,
+		"total_tokens":            st.TotalTokens,
+		"total_prompt_tokens":     st.TotalPromptTokens,
+		"total_cached_tokens":     st.TotalCachedTokens,
+		"total_completion_tokens": st.TotalCompletionTokens,
+		"by_key":                  st.ByKey,
+		"by_model":                st.ByModel,
+		"by_status":               st.ByStatus,
+		"tokens_by_key":           byKey,
 	}, nil
 }
 

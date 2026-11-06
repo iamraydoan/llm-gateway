@@ -68,6 +68,22 @@ func (g *Gateway) ModelMap() map[string]string {
 	return out
 }
 
+type usagePayload struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+func (u *usagePayload) cachedTokens() int {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
+}
+
 type requestLog struct {
 	keyID            string
 	modelRequested   string
@@ -76,6 +92,7 @@ type requestLog struct {
 	start            time.Time
 	stream           bool
 	promptTokens     int
+	cachedTokens     int
 	completionTokens int
 	totalTokens      int
 	errMsg           string
@@ -93,6 +110,7 @@ func (g *Gateway) finishLog(l *requestLog) {
 		Status:           l.status,
 		LatencyMs:        time.Since(l.start).Milliseconds(),
 		PromptTokens:     l.promptTokens,
+		CachedTokens:     l.cachedTokens,
 		CompletionTokens: l.completionTokens,
 		TotalTokens:      l.totalTokens,
 		Stream:           l.stream,
@@ -318,14 +336,11 @@ func (g *Gateway) serveJSON(w http.ResponseWriter, resp *http.Response, lg *requ
 		return
 	}
 	var parsed struct {
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
+		Usage usagePayload `json:"usage"`
 	}
 	if json.Unmarshal(b, &parsed) == nil {
 		lg.promptTokens = parsed.Usage.PromptTokens
+		lg.cachedTokens = parsed.Usage.cachedTokens()
 		lg.completionTokens = parsed.Usage.CompletionTokens
 		lg.totalTokens = parsed.Usage.TotalTokens
 	}
@@ -369,14 +384,11 @@ func (g *Gateway) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 			data := bytes.TrimSpace(line[len("data:"):])
 			if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
 				var chunk struct {
-					Usage *struct {
-						PromptTokens     int `json:"prompt_tokens"`
-						CompletionTokens int `json:"completion_tokens"`
-						TotalTokens      int `json:"total_tokens"`
-					} `json:"usage"`
+					Usage *usagePayload `json:"usage"`
 				}
 				if json.Unmarshal(data, &chunk) == nil && chunk.Usage != nil {
 					lg.promptTokens = chunk.Usage.PromptTokens
+					lg.cachedTokens = chunk.Usage.cachedTokens()
 					lg.completionTokens = chunk.Usage.CompletionTokens
 					lg.totalTokens = chunk.Usage.TotalTokens
 				}
