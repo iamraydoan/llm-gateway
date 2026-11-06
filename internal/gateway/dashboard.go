@@ -121,6 +121,12 @@ func (g *Gateway) statsPayload(from, to time.Time, hours int) (map[string]any, e
 			return nil, err
 		}
 		byKey, err = g.store.TokensByKeyRange(from, to)
+	} else if hours < 0 {
+		st, err = g.store.StatsRange(time.Time{}, time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		byKey, err = g.store.TokensByKeyRange(time.Time{}, time.Time{})
 	} else {
 		if hours <= 0 {
 			hours = 24
@@ -242,6 +248,10 @@ func (g *Gateway) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	if h, err := strconv.Atoi(q.Get("hours")); err == nil && h > 0 {
+		now := time.Now()
+		from, to = now.Add(-time.Duration(h)*time.Hour), now
+	}
 	status, _ := strconv.Atoi(q.Get("status"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 500 {
@@ -280,6 +290,9 @@ func (g *Gateway) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	hours, _ := strconv.Atoi(q.Get("hours"))
+	if q.Has("hours") && hours == 0 {
+		hours = -1
+	}
 	from, err := parseLogTime(q.Get("from"), false)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})

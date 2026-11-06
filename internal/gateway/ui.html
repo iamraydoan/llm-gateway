@@ -130,6 +130,7 @@
           <button data-hours="24" class="active">24h</button>
           <button data-hours="168">7d</button>
           <button data-hours="720">30d</button>
+          <button data-hours="0">All</button>
         </div>
         <div><label>From</label><input type="datetime-local" id="d-from"></div>
         <div><label>To</label><input type="datetime-local" id="d-to"></div>
@@ -167,6 +168,13 @@
     <section class="page" id="page-logs">
       <div class="page-head"><h2>Logs</h2><span class="spacer"></span><span class="muted" id="logs-total"></span></div>
       <div class="filters">
+        <div class="presets" id="log-presets">
+          <button data-hours="1">1h</button>
+          <button data-hours="24">24h</button>
+          <button data-hours="168">7d</button>
+          <button data-hours="720">30d</button>
+          <button data-hours="0">All</button>
+        </div>
         <div><label>From</label><input type="datetime-local" id="f-from"></div>
         <div><label>To</label><input type="datetime-local" id="f-to"></div>
         <div><label>Key</label><select id="f-key"><option value="">all keys</option></select></div>
@@ -174,7 +182,7 @@
         <div><label>Status</label><select id="f-status"><option value="">any</option><option value="200">200</option><option value="400">400</option><option value="401">401</option><option value="429">429</option><option value="500">500</option><option value="502">502</option></select></div>
         <div><label><input type="checkbox" id="f-errors"> errors only</label></div>
         <div><label>Page size</label><select id="f-limit"><option>25</option><option selected>50</option><option>100</option></select></div>
-        <button class="primary" onclick="applyLogFilters()">Apply</button>
+        <button class="primary" onclick="clearLogPresets(); applyLogFilters()">Apply</button>
         <button onclick="resetLogFilters()">Reset</button>
       </div>
       <div class="table-wrap"><table id="logs">
@@ -304,12 +312,13 @@ function statsQuery() {
 }
 function dashRangeLabel() {
   if (dashFrom || dashTo) return (dashFrom || '…') + ' → ' + (dashTo || 'now');
+  if (dashHours === 0) return 'all time';
   if (dashHours === 24) return 'last 24h';
   return 'last ' + (dashHours >= 24 ? (dashHours / 24) + 'd' : dashHours + 'h');
 }
 function setDashRange() {
   $('#dash-range').textContent = dashRangeLabel();
-  const short = (dashFrom || dashTo) ? 'custom' : dashHours === 1 ? '1h' : dashHours === 24 ? '24h' : dashHours === 168 ? '7d' : '30d';
+  const short = (dashFrom || dashTo) ? 'custom' : dashHours === 0 ? 'all' : dashHours === 1 ? '1h' : dashHours === 24 ? '24h' : dashHours === 168 ? '7d' : '30d';
   $$('#page-dashboard .card .label').forEach(el => { el.textContent = el.textContent.replace(/ \([^)]*\)$/, ' (' + short + ')'); });
   const h3 = document.querySelector('#page-dashboard h3');
   if (h3) h3.textContent = h3.textContent.replace(/ \([^)]*\)$/, ' (' + short + ')');
@@ -354,11 +363,16 @@ function renderLogRows(tbody, logs, maxRows) {
   tbody.innerHTML = logs.slice(0, maxRows || logs.length).map(l => logRowHtml(l, withStream)).join('') || `<tr><td colspan="11" class="muted">no requests</td></tr>`;
 }
 
+let logPresetHours = 0;
 function logQuery(offset) {
   const p = new URLSearchParams();
-  const from = $('#f-from').value, to = $('#f-to').value;
-  if (from) p.set('from', from);
-  if (to) p.set('to', to);
+  if (logPresetHours > 0) {
+    p.set('hours', logPresetHours);
+  } else {
+    const from = $('#f-from').value, to = $('#f-to').value;
+    if (from) p.set('from', from);
+    if (to) p.set('to', to);
+  }
   const key = $('#f-key').value; if (key) p.set('key_id', key);
   const model = $('#f-model').value.trim(); if (model) p.set('model', model);
   const status = $('#f-status').value; if (status) p.set('status', status);
@@ -387,10 +401,36 @@ function logPage(d) {
   logOffset = Math.max(0, logOffset + d * limit);
   loadLogs();
 }
+function fmtLocalInput(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function clearLogPresets() {
+  logPresetHours = 0;
+  $$('#page-logs .presets button').forEach(x => x.classList.remove('active'));
+}
+document.querySelectorAll('#page-logs .presets button').forEach(b => {
+  b.addEventListener('click', () => {
+    const h = parseInt(b.dataset.hours, 10);
+    if (h > 0) {
+      const now = new Date();
+      $('#f-to').value = fmtLocalInput(now);
+      $('#f-from').value = fmtLocalInput(new Date(now.getTime() - h * 3600 * 1000));
+    } else {
+      $('#f-from').value = ''; $('#f-to').value = '';
+    }
+    clearLogPresets();
+    logPresetHours = h;
+    b.classList.add('active');
+    applyLogFilters();
+  });
+});
+['f-from', 'f-to'].forEach(id => document.getElementById(id).addEventListener('change', clearLogPresets));
 function applyLogFilters() { logOffset = 0; loadLogs(); }
 function resetLogFilters() {
   $('#f-from').value = ''; $('#f-to').value = ''; $('#f-key').value = '';
   $('#f-model').value = ''; $('#f-status').value = ''; $('#f-errors').checked = false;
+  clearLogPresets();
   logOffset = 0; loadLogs();
 }
 function logMatchesFilters(l) {
@@ -419,7 +459,7 @@ function logInDashRange(l) {
   const ts = new Date(l.ts).getTime();
   if (dashFrom && ts < new Date(dashFrom).getTime()) return false;
   if (dashTo && ts > new Date(dashTo).getTime()) return false;
-  if (!dashFrom && !dashTo && ts < Date.now() - dashHours * 3600 * 1000) return false;
+  if (!dashFrom && !dashTo && dashHours > 0 && ts < Date.now() - dashHours * 3600 * 1000) return false;
   return true;
 }
 function applyLogEvent(l) {

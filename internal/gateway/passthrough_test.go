@@ -1143,9 +1143,82 @@ func TestDashboardUIMobile(t *testing.T) {
 		`@media (max-width: 900px)`,
 		`setNav(`,
 		`min-width:0`,
+		`id="log-presets"`,
+		`fmtLocalInput(`,
+		`logPresetHours`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("dashboard HTML missing %q", want)
 		}
+	}
+}
+
+func TestAPIStatsHoursZeroAllTime(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true},
+	}, nil, "")
+	defer gw.Close()
+	if _, err := st.Log(&store.Entry{
+		TS: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), KeyID: "good",
+		ModelRequested: "gpt-4o-mini", ModelUpstream: "gpt-4o-mini",
+		Status: 200, PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15,
+	}); err != nil {
+		t.Fatalf("seed old log: %v", err)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if got := statsPayload(t, gw.URL+"/api/stats?hours=24")["total_requests"]; got != float64(1) {
+		t.Fatalf("hours=24 total_requests = %v, want 1", got)
+	}
+	if got := statsPayload(t, gw.URL+"/api/stats?hours=0")["total_requests"]; got != float64(2) {
+		t.Fatalf("hours=0 total_requests = %v, want 2", got)
+	}
+	if got := statsPayload(t, gw.URL+"/api/stats")["total_requests"]; got != float64(1) {
+		t.Fatalf("no hours param total_requests = %v, want 1 (default 24h)", got)
+	}
+}
+
+func TestAPILogsHoursParam(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true},
+	}, nil, "")
+	defer gw.Close()
+	if _, err := st.Log(&store.Entry{
+		TS: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), KeyID: "good",
+		ModelRequested: "gpt-4o-mini", ModelUpstream: "gpt-4o-mini",
+		Status: 200, PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15,
+	}); err != nil {
+		t.Fatalf("seed old log: %v", err)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	logs := func(q string) map[string]any {
+		t.Helper()
+		resp, err := http.Get(gw.URL + "/api/logs?" + q)
+		if err != nil {
+			t.Fatalf("logs get: %v", err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("logs decode: %v", err)
+		}
+		return out
+	}
+	if got := logs("hours=24")["total"]; got != float64(1) {
+		t.Fatalf("hours=24 total = %v, want 1", got)
+	}
+	if got := logs("limit=50")["total"]; got != float64(2) {
+		t.Fatalf("no hours total = %v, want 2", got)
 	}
 }
