@@ -1,6 +1,13 @@
+# build output
 /llm-gateway
+
+# local config with real API keys (use config.example.yaml as template)
 /config.yaml
+
+# sqlite databases (keys, model map, request logs)
 /gateway.db*
 e2e/gateway.db*
+
+# OS / editor
 .DS_Store
 *.png

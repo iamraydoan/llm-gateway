@@ -1,13 +1,18 @@
+# e2e test config: upstream is the mock server on :18081.
 server:
   listen: ":18080"
   master_key: ""
+
 upstream:
   base_url: "http://127.0.0.1:18081"
   timeout_seconds: 30
+
 model_map:
   cheap: gpt-4o-mini
   smart: gpt-4o
+
 keys:
+  # priority 1, but always 429 -> should fail over to key-2 and get blacklisted
   - id: bad-429
     name: "Always 429"
     api_key: "key-429"
@@ -18,6 +23,8 @@ keys:
     rate_limits:
       - max: 100
         window: 1m
+
+  # priority 2, healthy, 2 req/min limit to test rate-limit jump
   - id: good-limited
     name: "Limited 2/min"
     api_key: "key-good"
@@ -28,6 +35,8 @@ keys:
     rate_limits:
       - max: 2
         window: 1m
+
+  # priority 3, healthy fallback
   - id: good-fallback
     name: "Fallback"
     api_key: "key-good"
@@ -38,6 +47,8 @@ keys:
     rate_limits:
       - max: 100
         window: 1m
+
+  # priority 4, quota-exhausted key (not used in the scripted test, check via API)
   - id: quota-key
     name: "Quota test"
     api_key: "key-quota"

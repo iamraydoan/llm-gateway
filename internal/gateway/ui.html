@@ -113,7 +113,7 @@
     <section class="page" id="page-keys">
       <div class="page-head"><h2>Keys</h2><span class="muted">priority order — first usable key wins</span><span class="spacer"></span><button class="primary" onclick="openKeyModal()">+ Add key</button></div>
       <table id="keys">
-        <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Proxy</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Last error</th><th>Proxy</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -203,6 +203,13 @@ async function api(path, opts) {
   return data;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s; }
+function fmtRetry(sec) {
+  if (!sec || sec <= 0) return '';
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm' + (sec % 60 ? (sec % 60) + 's' : '');
+  return Math.floor(sec / 3600) + 'h' + (Math.floor(sec / 60) % 60 ? (Math.floor(sec / 60) % 60) + 'm' : '');
+}
 
 function currentPage() { return (location.hash || '#/dashboard').replace('#/', '') || 'dashboard'; }
 function showPage() {
@@ -231,6 +238,9 @@ function renderKeys(data) {
       return `<div>${used}/${r.max} per ${r.window}<div class="bar"><div class="${cls}" style="width:${pct}%"></div></div></div>`;
     }).join('') || '<span class="muted">none</span>';
     const cd = [k.cooldown_until, k.quota_reset_at].filter(Boolean).join('<br>') || '<span class="muted">—</span>';
+    const errCell = k.last_error
+      ? `<div class="err" title="${esc(k.last_error)}${k.last_error_at ? ' — ' + esc(new Date(k.last_error_at).toLocaleString()) : ''}">${esc(trunc(k.last_error, 60))}</div><div class="muted">${k.consecutive_failures ? 'fails ' + k.consecutive_failures : ''}${k.retry_in_seconds ? ' · retry in ' + fmtRetry(k.retry_in_seconds) : ''}</div>`
+      : '<span class="muted">—</span>';
     return `<tr>
       <td><strong>${esc(k.name || k.id)}</strong></td>
       <td class="mono">${esc(k.id)}<br><span class="muted">${esc(k.api_key_masked || '')}</span></td>
@@ -240,6 +250,7 @@ function renderKeys(data) {
       <td>${rl}</td>
       <td>${k.total_requests} / <span class="${k.total_errors ? 'err' : ''}">${k.total_errors}</span></td>
       <td class="mono">${cd}</td>
+      <td>${errCell}</td>
       <td class="mono muted">${k.proxy ? esc(k.proxy.replace(/:\/\/[^@]+@/, '://***@')) : 'direct'}</td>
       <td style="white-space:nowrap">
         <button onclick="openKeyModal('${esc(k.id)}')">Edit</button>

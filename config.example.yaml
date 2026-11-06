@@ -1,26 +1,37 @@
+# llm-gateway config. Copy to config.yaml and fill in your keys.
 server:
   listen: ":8080"
+  # Optional: clients must send this as Bearer token. Empty = no auth.
   master_key: ""
+  # Optional: SQLite path for keys, model map and logs.
+  # Default: gateway.db next to config.yaml. Env LLM_GATEWAY_DB wins.
+  # db_path: "/app/data/gateway.db"
+
 upstream:
   base_url: "https://api.openai.com"
   timeout_seconds: 120
+
+# Model mapping: requested model -> upstream model.
+# Unmapped models pass through unchanged.
 model_map:
   cheap: gpt-4o-mini
   smart: gpt-4o
   gpt-4o-mini: gpt-4o-mini
+
 keys:
   - id: key-1
     name: "Main account"
     api_key: "sk-REPLACE-ME-1"
-    proxy: ""
-    priority: 1
-    max_concurrency: 5
+    proxy: ""                       # empty = direct; e.g. http://user:pass@host:port
+    priority: 1                     # lower = tried first
+    max_concurrency: 5              # max in-flight requests for this key, 0 = unlimited
     enabled: true
     rate_limits:
       - max: 5
         window: 1m
       - max: 100
         window: 1h
+
   - id: key-2
     name: "Backup via proxy"
     api_key: "sk-REPLACE-ME-2"
@@ -33,6 +44,7 @@ keys:
         window: 1m
       - max: 100
         window: 1h
+
   - id: key-3
     name: "High limit"
     api_key: "sk-REPLACE-ME-3"

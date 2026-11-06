@@ -57,7 +57,7 @@ func TestSkipDisabledAndCooldown(t *testing.T) {
 	release()
 
 	k2 := p.Find("k2")
-	k2.ReportFailure(429, 0, false, time.Time{})
+	k2.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	if _, _, err := p.Acquire(context.Background()); err == nil {
 		t.Fatalf("expected no key available while k2 cools down")
 	}
@@ -131,16 +131,16 @@ func TestBackoffGrows(t *testing.T) {
 		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
 	})
 	k := p.Find("k1")
-	k.ReportFailure(429, 0, false, time.Time{})
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	first := k.cooldownUntil
-	k.ReportFailure(429, 0, false, time.Time{})
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	second := k.cooldownUntil
 	if !second.After(first) {
 		t.Fatalf("backoff did not grow: first=%v second=%v", first, second)
 	}
 
 	k.ReportSuccess()
-	k.ReportFailure(429, 0, false, time.Time{})
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	third := k.cooldownUntil
 	if !third.Before(second) {
 		t.Fatalf("backoff did not reset after success: %v vs %v", third, second)
@@ -154,7 +154,7 @@ func TestQuotaExhaustionSkipsUntilReset(t *testing.T) {
 	})
 	k1 := p.Find("k1")
 	reset := time.Now().Add(30 * time.Minute)
-	k1.ReportFailure(429, 0, true, reset)
+	k1.ReportFailure(429, 0, true, reset, "insufficient_quota: You exceeded your current quota")
 	k, rel, err := p.Acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -193,7 +193,7 @@ func TestSyncPreservesState(t *testing.T) {
 	})
 
 	k1 := p.Find("k1")
-	k1.ReportFailure(429, 0, false, time.Time{})
+	k1.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	if err := p.Sync([]config.Key{
 		{ID: "k1", Name: "One-renamed", APIKey: "sk-1", Priority: 1, Enabled: true},
 		{ID: "k2", Name: "Two", APIKey: "sk-2", Priority: 2, Enabled: true},
@@ -234,7 +234,7 @@ func TestStatusChangeHook(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("expected hook after success, got %d calls", calls)
 	}
-	k.ReportFailure(429, 0, false, time.Time{})
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
 	if calls != 2 {
 		t.Fatalf("expected hook after failure, got %d calls", calls)
 	}
@@ -245,8 +245,38 @@ func TestStatusChangeHook(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	p.Find("k2").ReportFailure(500, 0, false, time.Time{})
+	p.Find("k2").ReportFailure(500, 0, false, time.Time{}, "server_error: internal error")
 	if calls != 3 {
 		t.Fatalf("expected hook for synced key, got %d calls", calls)
+	}
+}
+
+func TestLastErrorDetail(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+	})
+	k := p.Find("k1")
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
+	st := k.Status(time.Now())
+	if st.LastError != "rate_limit_exceeded: Rate limit reached" {
+		t.Fatalf("last error not stored: %q", st.LastError)
+	}
+	if st.LastErrorAt == "" {
+		t.Fatal("last_error_at missing")
+	}
+	if st.Fails != 1 {
+		t.Fatalf("expected 1 consecutive failure, got %d", st.Fails)
+	}
+	if st.RetryInSeconds <= 0 {
+		t.Fatalf("expected retry_in_seconds > 0, got %d", st.RetryInSeconds)
+	}
+	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
+	if st := k.Status(time.Now()); st.Fails != 2 {
+		t.Fatalf("expected 2 consecutive failures, got %d", st.Fails)
+	}
+	k.ReportSuccess()
+	st = k.Status(time.Now())
+	if st.LastError != "" || st.Fails != 0 {
+		t.Fatalf("success should clear last error, got %q fails %d", st.LastError, st.Fails)
 	}
 }

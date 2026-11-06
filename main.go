@@ -1,3 +1,13 @@
+// llm-gateway: a minimal OpenAI-compatible gateway that routes requests
+// through an ordered pool of API keys, each with its own proxy, concurrency
+// limit and multi-window rate limits. Keys that hit rate limits are
+// blacklisted with exponential backoff; quota exhaustion is tracked until
+// its reset time. Every request is logged to SQLite and shown on a
+// built-in dashboard.
+//
+// Keys and model mappings live in SQLite (gateway.db next to the config)
+// and are managed from the dashboard UI. The YAML config only seeds them
+// on first run, when the database is still empty.
 package main
 
 import (

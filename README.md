@@ -40,6 +40,11 @@ multi-window rate limits.
     full CRUD from the UI: add / edit / delete / enable / disable.
     Changes apply live without restart; in-flight state (cooldown,
     quota reset, rate-limit history) is preserved across edits.
+    The **Last error** column shows the last upstream error attached to
+    each key (e.g. `rate_limit_exceeded: Rate limit reached`,
+    `insufficient_quota: ...`), with consecutive failure count and
+    retry countdown from the exponential backoff; it clears when the
+    key succeeds again.
   - **Logs** — request log with date-range filter, key / model / status
     filters, errors-only toggle, and pagination (page size 25/50/100).
     New matching rows prepend live on page 1.

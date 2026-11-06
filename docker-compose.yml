@@ -1,3 +1,9 @@
+# llm-gateway — run with:  docker compose up -d --build
+#
+# First time: copy config.example.yaml to config.yaml and fill in your
+# keys (config.yaml is gitignored — it holds real API keys).
+# The SQLite database (keys, model map, request logs) lives in the
+# gateway-data volume and survives container recreates.
 services:
   llm-gateway:
     build: .
@@ -19,5 +25,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
 volumes:
   gateway-data:

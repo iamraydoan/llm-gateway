@@ -1,3 +1,12 @@
+// Package gateway (events): realtime push to the dashboard via SSE.
+//
+// The hub broadcasts three event types on /api/events:
+//   - "log":   one finished request (the stored log entry as JSON)
+//   - "keys":  full key-pool status snapshot (debounced to 1/sec)
+//   - "stats": aggregate counters + per-key token usage
+//
+// Clients that fall behind have their frames dropped instead of blocking
+// the gateway; they re-sync by refetching the REST endpoints.
 package gateway
 
 import (
@@ -47,11 +56,13 @@ func (h *Hub) Broadcast(event string, payload []byte) {
 		select {
 		case ch <- frame:
 		default:
-
+			// slow client: drop the frame, it re-syncs via REST
 		}
 	}
 }
 
+// NotifyKeys marks the key snapshot dirty; the loop broadcasts it at most
+// once per second (coalescing bursts of failures).
 func (h *Hub) NotifyKeys() {
 	h.keysMu.Lock()
 	h.keysDirty = true

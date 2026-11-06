@@ -89,20 +89,24 @@ type Key struct {
 	cfg config.Key
 
 	mu            sync.Mutex
-	sem           chan struct{}
+	sem           chan struct{} // concurrency semaphore, nil = unlimited
 	windows       []*slidingWindow
 	cooldownUntil time.Time
 	quotaResetAt  time.Time
-	fails         int
+	fails         int // consecutive failures, drives exponential backoff
 	inFlight      int
 
 	TotalRequests int
 	TotalErrors   int
 	LastError     string
+	LastErrorAt   time.Time
 	LastUsedAt    time.Time
 
+	// notify is called (after unlocking) when the key's live state changes
+	// (success / failure). Set by the pool; used for realtime pushes.
 	notify func()
 
+	// one http.Client per key so each key can use its own proxy
 	client *http.Client
 }
 
@@ -148,6 +152,11 @@ func (k *Key) SetEnabled(v bool) {
 	k.cfg.Enabled = v
 }
 
+// tryReserve attempts to reserve one concurrency slot + one hit in every
+// rate-limit window. Returns a release func on success (nil on failure);
+// the caller must call it when the request finishes. The release func
+// captures the semaphore channel in use at reserve time, so rebuilding the
+// semaphore (e.g. after a config change) cannot steal another request's slot.
 func (k *Key) tryReserve(now time.Time) func() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -161,6 +170,7 @@ func (k *Key) tryReserve(now time.Time) func() {
 		return nil
 	}
 
+	// rate limits first (cheap), then semaphore
 	reserved := 0
 	for _, w := range k.windows {
 		if !w.allow(now) {
@@ -225,6 +235,10 @@ func (k *Key) skipReason(now time.Time) string {
 func (k *Key) earliestRetry(now time.Time) time.Time {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.earliestRetryLocked(now)
+}
+
+func (k *Key) earliestRetryLocked(now time.Time) time.Time {
 	var best time.Time
 	consider := func(t time.Time) {
 		if t.IsZero() || !t.After(now) {
@@ -246,6 +260,8 @@ func (k *Key) ReportSuccess() {
 	k.mu.Lock()
 	k.TotalRequests++
 	k.fails = 0
+	k.LastError = ""
+	k.LastErrorAt = time.Time{}
 	notify := k.notify
 	k.mu.Unlock()
 	if notify != nil {
@@ -253,14 +269,16 @@ func (k *Key) ReportSuccess() {
 	}
 }
 
-func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted bool, quotaReset time.Time) {
+func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted bool, quotaReset time.Time, detail string) {
 	k.mu.Lock()
 	k.TotalErrors++
 	k.fails++
-	if status == http.StatusTooManyRequests || status >= 500 || status == 0 {
-		k.LastError = fmt.Sprintf("upstream %d", status)
+	if detail == "" {
+		detail = fmt.Sprintf("upstream %d", status)
 	}
+	k.LastError = detail
 	now := time.Now()
+	k.LastErrorAt = now
 	if quotaExhausted {
 
 		if !quotaReset.IsZero() && quotaReset.After(now) {
@@ -314,6 +332,9 @@ type Status struct {
 	TotalRequests  int               `json:"total_requests"`
 	TotalErrors    int               `json:"total_errors"`
 	LastError      string            `json:"last_error,omitempty"`
+	LastErrorAt    string            `json:"last_error_at,omitempty"`
+	Fails          int               `json:"consecutive_failures"`
+	RetryInSeconds int               `json:"retry_in_seconds,omitempty"`
 	SkipReason     string            `json:"skip_reason,omitempty"`
 	RateLimits     []RateLimitStatus `json:"rate_limits"`
 }
@@ -339,6 +360,15 @@ func (k *Key) Status(now time.Time) Status {
 		TotalRequests:  k.TotalRequests,
 		TotalErrors:    k.TotalErrors,
 		LastError:      k.LastError,
+		Fails:          k.fails,
+	}
+	if !k.LastErrorAt.IsZero() {
+		s.LastErrorAt = k.LastErrorAt.Format(time.RFC3339)
+	}
+	if next := k.earliestRetryLocked(now); !next.IsZero() {
+		if secs := int(time.Until(next).Seconds()); secs > 0 {
+			s.RetryInSeconds = secs
+		}
 	}
 	if !k.cooldownUntil.IsZero() && now.Before(k.cooldownUntil) {
 		s.CooldownUntil = k.cooldownUntil.Format(time.RFC3339)
