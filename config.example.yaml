@@ -14,6 +14,11 @@ server:
 upstream:
   base_url: "https://api.openai.com"
   timeout_seconds: 120
+  # Optional 9Router-style relay: requests go to this relay URL instead of
+  # the upstream directly. The gateway sends x-relay-target (upstream base)
+  # and x-relay-path (request path); the relay forwards method, headers and
+  # body as-is. A per-key relay_url overrides this one.
+  # relay_url: "https://your-relay.vercel.app"
 
 # Model mapping: requested model -> upstream model.
 # Unmapped models pass through unchanged.
@@ -27,6 +32,7 @@ keys:
     name: "Main account"
     api_key: "sk-REPLACE-ME-1"
     proxy: ""                       # empty = direct; e.g. http://user:pass@host:port
+    # relay_url: ""                   # optional: this key goes via the relay; wins over upstream.relay_url
     priority: 1                     # lower = tried first
     max_concurrency: 5              # max in-flight requests for this key, 0 = unlimited
     enabled: true

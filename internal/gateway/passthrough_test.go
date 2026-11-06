@@ -64,6 +64,89 @@ func (f *fakeUpstream) receivedCount(token string) int {
 	return f.received[token]
 }
 
+type fakeRelay struct {
+	mu     sync.Mutex
+	target string
+	path   string
+	auth   string
+	hits   int
+	fail   bool
+}
+
+func newRelayServer(t *testing.T) (*httptest.Server, *fakeRelay) {
+	t.Helper()
+	r := &fakeRelay{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		r.target = req.Header.Get("x-relay-target")
+		r.path = req.Header.Get("x-relay-path")
+		r.auth = req.Header.Get("Authorization")
+		r.hits++
+		fail := r.fail
+		r.mu.Unlock()
+		if r.target == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"Missing x-relay-target header"}`))
+			return
+		}
+		if fail {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"relay rate limited","type":"rate_limit_error"}}`))
+			return
+		}
+		body, _ := io.ReadAll(req.Body)
+		up, err := http.NewRequest(req.Method, r.target+r.path, bytes.NewReader(body))
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		for k, vs := range req.Header {
+			lk := strings.ToLower(k)
+			if lk == "x-relay-target" || lk == "x-relay-path" || lk == "host" {
+				continue
+			}
+			for _, v := range vs {
+				up.Header.Add(k, v)
+			}
+		}
+		resp, err := http.DefaultClient.Do(up)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		fl, _ := w.(http.Flusher)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				if fl != nil {
+					fl.Flush()
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, r
+}
+
+func (r *fakeRelay) snapshot() (target, path, auth string, hits int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.target, r.path, r.auth, r.hits
+}
+
 func (f *fakeUpstream) maxInFlight(token string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -351,6 +434,79 @@ func TestKeysSurviveRestart(t *testing.T) {
 	}
 	if le, _ := bad["last_error"].(string); le == "" || !strings.Contains(le, "Rate limit reached") {
 		t.Fatalf("bad last_error = %q, want raw 429 body from logs", le)
+	}
+}
+
+func TestPassthroughRelay(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	relay, cap := newRelayServer(t)
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true, RelayURL: relay.URL},
+	}, map[string]string{"cheap": "gpt-4o-mini"}, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	status, body := postChat(t, client, gw.URL, "cheap", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	if up.receivedCount("tok-good") != 1 {
+		t.Fatalf("upstream received = %d, want 1 via relay", up.receivedCount("tok-good"))
+	}
+	target, path, auth, hits := cap.snapshot()
+	if hits != 1 || target != srv.URL || path != "/v1/chat/completions" || auth != "Bearer tok-good" {
+		t.Fatalf("relay saw target=%q path=%q auth=%q hits=%d", target, path, auth, hits)
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 1 || logs[0].TotalTokens != 15 || logs[0].CachedTokens != 4 {
+		t.Fatalf("log = %+v, want 1 line 15 tokens 4 cached", logs)
+	}
+}
+
+func TestPassthroughRelayStream(t *testing.T) {
+	up := newFakeUpstream()
+	up.behaviors["tok-good"] = streamOK()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	relay, _ := newRelayServer(t)
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true, RelayURL: relay.URL},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	status, body := postChat(t, client, gw.URL, "gpt-4o-mini", true, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	if !strings.Contains(string(body), "usage") {
+		t.Fatalf("stream body missing usage chunk: %s", body)
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 1 || !logs[0].Stream || logs[0].TotalTokens != 15 || logs[0].CachedTokens != 4 {
+		t.Fatalf("log = %+v, want 1 stream line 15 tokens 4 cached", logs)
+	}
+}
+
+func TestPassthroughRelayFailover(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	relay, cap := newRelayServer(t)
+	cap.fail = true
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "bad", APIKey: "tok-bad", Priority: 1, Enabled: true, RelayURL: relay.URL},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if up.receivedCount("tok-good") != 1 {
+		t.Fatalf("good received = %d, want 1 after relay 429 failover", up.receivedCount("tok-good"))
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 2 || logs[0].KeyID != "bad" || logs[0].Status != 429 || logs[1].KeyID != "good" {
+		t.Fatalf("logs = %+v, want bad/429 then good/200", logs)
 	}
 }
 

@@ -11,6 +11,16 @@ multi-window rate limits.
   rate limit, or at max concurrency. The first usable key wins.
 - **Per-key proxy** — each key can have its own HTTP proxy
   (`http://user:pass@host:port`); empty means direct.
+- **9Router-style relay** — `upstream.relay_url` (or per-key `relay_url`,
+  which wins) routes requests through a serverless relay instead of the
+  upstream directly. The gateway sends `x-relay-target` (upstream base)
+  and `x-relay-path` (request path) to the relay, which forwards method,
+  headers and body as-is; the key's `Authorization` header passes through
+  to the upstream. A relayed key skips its HTTP proxy (relay wins, same
+  as 9Router's `proxyAwareFetch`). Relay failures fail over to the next
+  key like any other upstream error. The dashboard header shows
+  `via relay <host>` when an upstream relay is set, and the Keys page
+  shows each key's relay host in the Proxy column.
 - **Per-key concurrency** — `max_concurrency` caps in-flight requests per
   key (`0` = unlimited). A busy key is skipped, the next key takes the call.
 - **Multi-window rate limits** — sliding windows per key, e.g. `5 req / 1m`

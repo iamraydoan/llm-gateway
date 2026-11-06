@@ -182,6 +182,7 @@ async function api(path, opts) {
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   return data;
 }
+function hostOf(u) { try { return new URL(u).host; } catch (_) { return u; } }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s; }
 function fmtRetry(sec) {
@@ -231,7 +232,7 @@ function renderKeys(data) {
       <td>${k.total_requests} / <span class="${k.total_errors ? 'err' : ''}">${k.total_errors}</span></td>
       <td class="mono">${cd}</td>
       <td>${errCell}</td>
-      <td class="mono muted">${k.proxy ? esc(k.proxy.replace(/:\/\/[^@]+@/, '://***@')) : 'direct'}</td>
+      <td class="mono muted">${k.relay_url ? `<div>relay ${esc(hostOf(k.relay_url))}</div>` : ''}${k.proxy ? esc(k.proxy.replace(/:\/\/[^@]+@/, '://***@')) : 'direct'}</td>
     </tr>`;
   }).join('');
   $('#st-ready').textContent = ready + ' / ' + keysCache.length;
@@ -482,7 +483,7 @@ function connectSSE() {
 
 async function loadConfig() {
   const c = await api('/api/config');
-  $('#upstream').textContent = 'upstream: ' + c.upstream;
+  $('#upstream').textContent = 'upstream: ' + c.upstream + (c.relay_url ? ' · via relay ' + hostOf(c.relay_url) : '');
 }
 function tickClock() { $('#clock').textContent = new Date().toLocaleTimeString(); }
 loadConfig(); showPage(); connectSSE();

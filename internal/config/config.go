@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type Key struct {
 	Name           string          `yaml:"name"`
 	APIKey         string          `yaml:"api_key"`
 	Proxy          string          `yaml:"proxy"`
+	RelayURL       string          `yaml:"relay_url"`
 	Priority       int             `yaml:"priority"`
 	MaxConcurrency int             `yaml:"max_concurrency"`
 	Enabled        bool            `yaml:"enabled"`
@@ -44,6 +46,7 @@ type Server struct {
 type Upstream struct {
 	BaseURL        string `yaml:"base_url"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	RelayURL       string `yaml:"relay_url"`
 }
 
 type Config struct {
@@ -88,6 +91,18 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+func validateRelayURL(field, v string) (string, error) {
+	v = strings.TrimSuffix(strings.TrimSpace(v), "/")
+	if v == "" {
+		return "", nil
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("config: %s must be an http(s) URL, got %q", field, v)
+	}
+	return v, nil
+}
+
 func (c *Config) Validate() error {
 	if c.Server.Listen == "" {
 		c.Server.Listen = ":8080"
@@ -96,6 +111,10 @@ func (c *Config) Validate() error {
 		c.Upstream.BaseURL = "https://api.openai.com"
 	}
 	c.Upstream.BaseURL = strings.TrimSuffix(c.Upstream.BaseURL, "/")
+	var err error
+	if c.Upstream.RelayURL, err = validateRelayURL("upstream.relay_url", c.Upstream.RelayURL); err != nil {
+		return err
+	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
@@ -123,6 +142,9 @@ func (c *Config) Validate() error {
 		}
 		if k.MaxConcurrency < 0 {
 			k.MaxConcurrency = 0
+		}
+		if k.RelayURL, err = validateRelayURL("key "+k.ID+".relay_url", k.RelayURL); err != nil {
+			return err
 		}
 		for j := range k.RateLimits {
 			r := &k.RateLimits[j]

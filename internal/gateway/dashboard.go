@@ -301,6 +301,7 @@ func (g *Gateway) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"upstream":  g.cfg.Upstream.BaseURL,
+		"relay_url": g.cfg.Upstream.RelayURL,
 		"model_map": g.ModelMap(),
 		"listen":    g.cfg.Server.Listen,
 	})

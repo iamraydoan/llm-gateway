@@ -140,6 +140,8 @@ func (k *Key) Priority() int { return k.cfg.Priority }
 
 func (k *Key) Proxy() string { return k.cfg.Proxy }
 
+func (k *Key) RelayURL() string { return k.cfg.RelayURL }
+
 func (k *Key) APIKey() string { return k.cfg.APIKey }
 
 func (k *Key) Client() *http.Client { return k.client }
@@ -349,6 +351,7 @@ type Status struct {
 	QuotaResetAt   string            `json:"quota_reset_at,omitempty"`
 	TotalRequests  int               `json:"total_requests"`
 	TotalErrors    int               `json:"total_errors"`
+	RelayURL       string            `json:"relay_url,omitempty"`
 	LastError      string            `json:"last_error,omitempty"`
 	LastErrorAt    string            `json:"last_error_at,omitempty"`
 	Fails          int               `json:"consecutive_failures"`
@@ -377,6 +380,7 @@ func (k *Key) Status(now time.Time) Status {
 		InFlight:       k.inFlight,
 		TotalRequests:  k.TotalRequests,
 		TotalErrors:    k.TotalErrors,
+		RelayURL:       k.cfg.RelayURL,
 		LastError:      k.LastError,
 		Fails:          k.fails,
 	}

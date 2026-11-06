@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,9 @@ type Gateway struct {
 
 	modelMu  sync.RWMutex
 	modelMap map[string]string
+
+	directClient   *http.Client
+	upstreamTarget string
 }
 
 func New(cfg *config.Config, p *pool.Pool, s *store.Store, modelMap map[string]string) *Gateway {
@@ -37,6 +41,17 @@ func New(cfg *config.Config, p *pool.Pool, s *store.Store, modelMap map[string]s
 		modelMap = map[string]string{}
 	}
 	g := &Gateway{cfg: cfg, pool: p, store: s, modelMap: modelMap}
+	g.directClient = &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		Timeout: time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second,
+	}
+	if u, err := url.Parse(cfg.Upstream.BaseURL); err == nil && u.Scheme != "" && u.Host != "" {
+		g.upstreamTarget = u.Scheme + "://" + u.Host
+	}
 	g.hub = NewHub(g.keysSnapshot)
 
 	p.SetStatusChangeHook(func() { g.hub.NotifyKeys() })
@@ -176,14 +191,28 @@ func classifyUpstream(resp *http.Response, body []byte) upstreamError {
 }
 
 func (g *Gateway) doUpstream(ctx context.Context, key *pool.Key, method, path string, body []byte, stream bool) (*http.Response, *upstreamError, error) {
-	req, err := http.NewRequestWithContext(ctx, method, g.cfg.Upstream.BaseURL+path, bytes.NewReader(body))
+	relayURL := key.RelayURL()
+	if relayURL == "" {
+		relayURL = g.cfg.Upstream.RelayURL
+	}
+	url := g.cfg.Upstream.BaseURL + path
+	client := key.Client()
+	if relayURL != "" && g.upstreamTarget != "" {
+		url = relayURL
+		client = g.directClient
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
+	}
+	if relayURL != "" && g.upstreamTarget != "" {
+		req.Header.Set("x-relay-target", g.upstreamTarget)
+		req.Header.Set("x-relay-path", path)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key.APIKey())
 
-	resp, err := key.Client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -262,7 +291,7 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 
 		attemptLog := &requestLog{keyID: key.ID(), modelRequested: modelReq, modelUpstream: modelUp, start: time.Now()}
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Upstream.TimeoutSeconds)*time.Second)
-		resp, ue, doErr := g.doUpstream(ctx, key, r.Method, r.URL.Path, body, stream)
+		resp, ue, doErr := g.doUpstream(ctx, key, r.Method, r.URL.RequestURI(), body, stream)
 		if doErr != nil {
 
 			cancel()
