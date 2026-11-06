@@ -141,7 +141,10 @@ keys:
 ## Tests
 
 ```bash
-go test ./...          # unit tests: pool selection, rate limits, backoff
+go test ./...          # 30 tests: pool selection, rate limits, backoff, gateway
+                       # passthrough (failover, quota, auth, streaming) and a
+                       # 50-request integration test that audits the request log
+                       # for concurrency and rate-limit compliance
 ```
 
 `e2e/` holds a mock upstream + test config for an end-to-end smoke test:
