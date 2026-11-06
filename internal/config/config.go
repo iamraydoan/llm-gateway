@@ -35,9 +35,10 @@ func (k Key) MaskedAPIKey() string {
 }
 
 type Server struct {
-	Listen    string `yaml:"listen"`
-	MasterKey string `yaml:"master_key"`
-	DBPath    string `yaml:"db_path"`
+	Listen       string `yaml:"listen"`
+	MasterKey    string `yaml:"master_key"`
+	DBPath       string `yaml:"db_path"`
+	MaxFailovers int    `yaml:"max_failovers"`
 }
 
 type Upstream struct {
@@ -97,6 +98,9 @@ func (c *Config) Validate() error {
 	c.Upstream.BaseURL = strings.TrimSuffix(c.Upstream.BaseURL, "/")
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	if c.Server.MaxFailovers <= 0 {
+		c.Server.MaxFailovers = 10
 	}
 	if len(c.Keys) == 0 {
 		return fmt.Errorf("config: no keys defined")

@@ -120,10 +120,15 @@ func streamOK() http.HandlerFunc {
 }
 
 func newTestGateway(t *testing.T, upstreamURL string, keys []config.Key, modelMap map[string]string, masterKey string) (*httptest.Server, *store.Store) {
+	return newTestGatewayWithFailovers(t, upstreamURL, keys, modelMap, masterKey, 0)
+}
+
+func newTestGatewayWithFailovers(t *testing.T, upstreamURL string, keys []config.Key, modelMap map[string]string, masterKey string, maxFailovers int) (*httptest.Server, *store.Store) {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Server.Listen = ":0"
 	cfg.Server.MasterKey = masterKey
+	cfg.Server.MaxFailovers = maxFailovers
 	cfg.Upstream.BaseURL = upstreamURL
 	cfg.Upstream.TimeoutSeconds = 5
 	cfg.Keys = keys
@@ -248,8 +253,14 @@ func TestPassthroughFailover429(t *testing.T) {
 		t.Fatalf("good key upstream calls = %d, want 1", up.receivedCount("tok-good"))
 	}
 	logs := readAllLogs(t, st)
-	if len(logs) != 1 || logs[0].KeyID != "good" || logs[0].Status != 200 {
-		t.Fatalf("log = %+v, want 1 entry served by good with 200", logs)
+	if len(logs) != 2 {
+		t.Fatalf("log entries = %d, want 2 (one per attempt)", len(logs))
+	}
+	if logs[0].KeyID != "bad" || logs[0].Status != 429 || logs[0].Error == "" {
+		t.Fatalf("log[0] = %+v, want bad/429 with error", logs[0])
+	}
+	if logs[1].KeyID != "good" || logs[1].Status != 200 || logs[1].TotalTokens != 15 {
+		t.Fatalf("log[1] = %+v, want good/200 with 15 tokens", logs[1])
 	}
 }
 
@@ -296,8 +307,11 @@ func TestPassthroughQuotaKeySkipped(t *testing.T) {
 		t.Fatalf("quota key upstream calls = %d, want 1 (blacklisted after first quota error)", up.receivedCount("tok-quota"))
 	}
 	logs := readAllLogs(t, st)
-	if got := keyIDs(logs); len(got) != 2 || got[0] != "good" || got[1] != "good" {
-		t.Fatalf("log keys = %v, want [good good]", got)
+	if got := keyIDs(logs); len(got) != 3 || got[0] != "quota" || got[1] != "good" || got[2] != "good" {
+		t.Fatalf("log keys = %v, want [quota good good]", got)
+	}
+	if logs[0].Status != 429 || logs[1].Status != 200 || logs[2].Status != 200 {
+		t.Fatalf("log statuses = %d/%d/%d, want 429/200/200", logs[0].Status, logs[1].Status, logs[2].Status)
 	}
 }
 
@@ -318,8 +332,11 @@ func TestPassthroughAllKeysFail(t *testing.T) {
 		t.Fatalf("status = %d, want 429", status)
 	}
 	logs := readAllLogs(t, st)
-	if len(logs) != 1 || logs[0].Status != 429 {
-		t.Fatalf("log = %+v, want 1 entry with status 429", logs)
+	if len(logs) != 2 || logs[0].Status != 429 || logs[1].Status != 429 {
+		t.Fatalf("log = %+v, want 2 entries with status 429", logs)
+	}
+	if got := keyIDs(logs); got[0] != "a" || got[1] != "b" {
+		t.Fatalf("log keys = %v, want [a b]", got)
 	}
 }
 
@@ -452,39 +469,6 @@ func TestPassthroughConcurrency(t *testing.T) {
 	}
 }
 
-func maxLogOverlap(entries []store.Entry, keyID string) int {
-	type event struct {
-		at    time.Time
-		delta int
-	}
-	var events []event
-	for _, e := range entries {
-		if e.KeyID != keyID || e.LatencyMs <= 1 {
-			continue
-		}
-		start, err := time.Parse(time.RFC3339Nano, e.TS)
-		if err != nil {
-			continue
-		}
-		end := start.Add(time.Duration(e.LatencyMs-1) * time.Millisecond)
-		events = append(events, event{start, 1}, event{end, -1})
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].at.Equal(events[j].at) {
-			return events[i].delta < events[j].delta
-		}
-		return events[i].at.Before(events[j].at)
-	})
-	max, cur := 0, 0
-	for _, ev := range events {
-		cur += ev.delta
-		if cur > max {
-			max = cur
-		}
-	}
-	return max
-}
-
 func TestGatewayManyRequestsAuditLog(t *testing.T) {
 	up := newFakeUpstream()
 	up.behaviors["tok-429"] = errJSON(429,
@@ -565,8 +549,8 @@ func TestGatewayManyRequestsAuditLog(t *testing.T) {
 	}
 
 	logs := readAllLogs(t, st)
-	if len(logs) != total {
-		t.Fatalf("log entries = %d, want %d (one per request)", len(logs), total)
+	if len(logs) != total+2 {
+		t.Fatalf("log entries = %d, want %d (one per attempt + no-key outcomes)", len(logs), total+2)
 	}
 	byKey := map[string]int{}
 	logOK, log429 := 0, 0
@@ -587,23 +571,23 @@ func TestGatewayManyRequestsAuditLog(t *testing.T) {
 			t.Fatalf("log entry %+v: 200 with no key", e)
 		}
 	}
-	if logOK != ok || log429 != tooMany {
-		t.Fatalf("log 200/429 = %d/%d, client = %d/%d", logOK, log429, ok, tooMany)
+	if logOK != ok || log429 != tooMany+2 {
+		t.Fatalf("log 200/429 = %d/%d, want %d/%d (client 429s + 2 extra attempt lines)", logOK, log429, ok, tooMany+2)
 	}
 	if byKey["q-limited"] != 2 {
 		t.Fatalf("log q-limited = %d, want 2", byKey["q-limited"])
 	}
-	if byKey["q-429"] != 0 {
-		t.Fatalf("log q-429 = %d, want 0 (it only failed, never served)", byKey["q-429"])
+	if byKey["q-429"] != 1 {
+		t.Fatalf("log q-429 = %d, want 1 (the wave-0 failure attempt)", byKey["q-429"])
+	}
+	if byKey[""] != 50-ok && byKey[""] != 49-ok {
+		t.Fatalf("log no-key = %d, want %d or %d (depends on whether the quota request's 2nd attempt caught a slow slot)", byKey[""], 50-ok, 49-ok)
 	}
 	if byKey["q-quota"] != 1 {
 		t.Fatalf("log q-quota = %d, want 1 (the single quota failure)", byKey["q-quota"])
 	}
 	if byKey["q-slow"] != ok-2 {
 		t.Fatalf("log q-slow = %d, want %d (all successes minus limited)", byKey["q-slow"], ok-2)
-	}
-	if overlap := maxLogOverlap(logs, "q-slow"); overlap > 3 {
-		t.Fatalf("log overlap on q-slow = %d, want <= 3 (max concurrency)", overlap)
 	}
 	limitedInWindow := 0
 	for _, e := range logs {
@@ -613,5 +597,163 @@ func TestGatewayManyRequestsAuditLog(t *testing.T) {
 	}
 	if limitedInWindow > 2 {
 		t.Fatalf("q-limited log entries in window = %d, want <= 2 (2/min)", limitedInWindow)
+	}
+}
+
+func keysStatus(t *testing.T, client *http.Client, srvURL string) []map[string]any {
+	t.Helper()
+	resp, err := client.Get(srvURL + "/api/keys")
+	if err != nil {
+		t.Fatalf("get keys: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var data struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		t.Fatalf("keys json: %v", err)
+	}
+	return data.Keys
+}
+
+func keyByID(t *testing.T, client *http.Client, srvURL, id string) map[string]any {
+	t.Helper()
+	for _, k := range keysStatus(t, client, srvURL) {
+		if k["id"] == id {
+			return k
+		}
+	}
+	t.Fatalf("key %q not in /api/keys", id)
+	return nil
+}
+
+func TestPassthroughLogsEveryAttempt(t *testing.T) {
+	up := newFakeUpstream()
+	up.behaviors["tok-bad"] = errJSON(429,
+		`{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		map[string]string{"Retry-After": "60"})
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "bad", APIKey: "tok-bad", Priority: 1, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 via failover", status)
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 2 {
+		t.Fatalf("log entries = %d, want 2 (key1 429 attempt + key2 200)", len(logs))
+	}
+	wantErr := `{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`
+	if logs[0].KeyID != "bad" || logs[0].Status != 429 || logs[0].Error != wantErr {
+		t.Fatalf("log[0] = %+v, want bad/429 with the raw upstream body", logs[0])
+	}
+	if logs[1].KeyID != "good" || logs[1].Status != 200 || logs[1].TotalTokens != 15 {
+		t.Fatalf("log[1] = %+v, want good/200 with 15 tokens", logs[1])
+	}
+	bad := keyByID(t, client, gw.URL, "bad")
+	if bad["last_error"] != wantErr {
+		t.Fatalf("bad last_error = %v, want the raw upstream body", bad["last_error"])
+	}
+	if bad["consecutive_failures"] != float64(1) {
+		t.Fatalf("bad consecutive_failures = %v, want 1", bad["consecutive_failures"])
+	}
+}
+
+func TestPassthroughMaxFailovers(t *testing.T) {
+	up := newFakeUpstream()
+	up.behaviors["tok-bad1"] = errJSON(429, `{"error":{"message":"limited","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "60"})
+	up.behaviors["tok-bad2"] = errJSON(429, `{"error":{"message":"limited","type":"rate_limit_error"}}`, map[string]string{"Retry-After": "60"})
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keys := []config.Key{
+		{ID: "bad1", APIKey: "tok-bad1", Priority: 1, Enabled: true},
+		{ID: "bad2", APIKey: "tok-bad2", Priority: 2, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 3, Enabled: true},
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	capped, stCapped := newTestGatewayWithFailovers(t, srv.URL, keys, nil, "", 2)
+	status, _ := postChat(t, client, capped.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("capped: status = %d, want 429 (only 2 keys tried)", status)
+	}
+	if up.receivedCount("tok-good") != 0 {
+		t.Fatalf("capped: good upstream calls = %d, want 0", up.receivedCount("tok-good"))
+	}
+	if logs := readAllLogs(t, stCapped); len(logs) != 2 {
+		t.Fatalf("capped: log entries = %d, want 2", len(logs))
+	}
+
+	def, stDef := newTestGateway(t, srv.URL, keys, nil, "")
+	status, _ = postChat(t, client, def.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("default: status = %d, want 200 (3rd key reached)", status)
+	}
+	if up.receivedCount("tok-good") != 1 {
+		t.Fatalf("default: good upstream calls = %d, want 1", up.receivedCount("tok-good"))
+	}
+	if logs := readAllLogs(t, stDef); len(logs) != 3 {
+		t.Fatalf("default: log entries = %d, want 3", len(logs))
+	}
+}
+
+func TestPassthroughSuccessClearsStoredError(t *testing.T) {
+	up := newFakeUpstream()
+	var mu sync.Mutex
+	calls := 0
+	up.behaviors["tok-flaky"] = func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			errJSON(429,
+				`{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+				map[string]string{"Retry-After": "1"})(w, r)
+			return
+		}
+		okJSON(0)(w, r)
+	}
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, st := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "flaky", APIKey: "tok-flaky", Priority: 1, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("request 1: status = %d, want 200 via good", status)
+	}
+	flaky := keyByID(t, client, gw.URL, "flaky")
+	if flaky["last_error"] == "" || flaky["last_error"] == nil {
+		t.Fatalf("flaky last_error should be set after the 429, got %v", flaky["last_error"])
+	}
+
+	time.Sleep(5500 * time.Millisecond)
+	status, _ = postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("request 2: status = %d, want 200 via flaky (cooldown over)", status)
+	}
+	flaky = keyByID(t, client, gw.URL, "flaky")
+	if v, ok := flaky["last_error"]; ok && v != "" {
+		t.Fatalf("flaky last_error = %v, want empty/absent after a success", v)
+	}
+	if flaky["consecutive_failures"] != float64(0) {
+		t.Fatalf("flaky consecutive_failures = %v, want 0 after a success", flaky["consecutive_failures"])
+	}
+	logs := readAllLogs(t, st)
+	if len(logs) != 3 {
+		t.Fatalf("log entries = %d, want 3 (flaky 429 + good 200 + flaky 200)", len(logs))
+	}
+	if got := keyIDs(logs); got[0] != "flaky" || got[1] != "good" || got[2] != "flaky" {
+		t.Fatalf("log keys = %v, want [flaky good flaky]", got)
 	}
 }

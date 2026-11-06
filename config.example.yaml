@@ -3,7 +3,11 @@ server:
   listen: ":8080"
   # Optional: clients must send this as Bearer token. Empty = no auth.
   master_key: ""
-  # Optional: SQLite path for keys, model map and logs.
+  # Optional: max keys tried per request. On any error (429, 4xx, 5xx,
+  # network) the failing key goes into cooldown backoff and the request
+  # jumps to the next key immediately (no waiting). 0 = default 10.
+  max_failovers: 10
+  # Optional: SQLite path for request logs.
   # Default: gateway.db next to config.yaml. Env LLM_GATEWAY_DB wins.
   # db_path: "/app/data/gateway.db"
 
