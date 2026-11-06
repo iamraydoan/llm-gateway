@@ -1,0 +1,6 @@
+/llm-gateway
+/config.yaml
+/gateway.db*
+e2e/gateway.db*
+.DS_Store
+*.png

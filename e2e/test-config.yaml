@@ -1,0 +1,47 @@
+server:
+  listen: ":18080"
+  master_key: ""
+upstream:
+  base_url: "http://127.0.0.1:18081"
+  timeout_seconds: 30
+model_map:
+  cheap: gpt-4o-mini
+  smart: gpt-4o
+keys:
+  - id: bad-429
+    name: "Always 429"
+    api_key: "key-429"
+    proxy: ""
+    priority: 1
+    max_concurrency: 5
+    enabled: true
+    rate_limits:
+      - max: 100
+        window: 1m
+  - id: good-limited
+    name: "Limited 2/min"
+    api_key: "key-good"
+    proxy: ""
+    priority: 2
+    max_concurrency: 5
+    enabled: true
+    rate_limits:
+      - max: 2
+        window: 1m
+  - id: good-fallback
+    name: "Fallback"
+    api_key: "key-good"
+    proxy: ""
+    priority: 3
+    max_concurrency: 5
+    enabled: true
+    rate_limits:
+      - max: 100
+        window: 1m
+  - id: quota-key
+    name: "Quota test"
+    api_key: "key-quota"
+    proxy: ""
+    priority: 4
+    max_concurrency: 5
+    enabled: true

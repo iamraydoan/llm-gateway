@@ -1,0 +1,6 @@
+.git
+llm-gateway
+gateway.db*
+config.yaml
+e2e/
+*.png

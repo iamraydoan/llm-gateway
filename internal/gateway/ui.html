@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Gateway</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --panel2:#1e222c; --text:#e6e8ec; --muted:#9aa3b2;
+    --green:#34c77b; --red:#f26d6d; --amber:#f5a524; --blue:#5aa9ff; --border:#262b36; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .layout { display:flex; min-height:100vh; }
+  nav { width:210px; flex-shrink:0; background:var(--panel); border-right:1px solid var(--border); padding:18px 12px; }
+  nav h1 { font-size:17px; margin:0 10px 4px; }
+  nav .sub { color:var(--muted); font-size:12px; margin:0 10px 18px; word-break:break-all; }
+  nav a { display:block; padding:9px 12px; border-radius:8px; color:var(--text); text-decoration:none; margin-bottom:2px; }
+  nav a:hover { background:var(--panel2); }
+  nav a.active { background:var(--panel2); font-weight:600; }
+  nav a .count { float:right; color:var(--muted); font-size:12px; }
+  main { flex:1; padding:20px 24px; max-width:1150px; }
+  .page { display:none; }
+  .page.active { display:block; }
+  .page-head { display:flex; align-items:baseline; gap:12px; margin-bottom:16px; }
+  .page-head h2 { font-size:18px; margin:0; }
+  .page-head .spacer { flex:1; }
+  .muted { color:var(--muted); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .card .value { font-size:26px; font-weight:700; margin-top:2px; }
+  h3 { font-size:15px; margin:22px 0 10px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; background:var(--panel2); }
+  tr:last-child td { border-bottom:none; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .b-ready { background:rgba(52,199,123,.15); color:var(--green); }
+  .b-cooldown { background:rgba(245,165,36,.15); color:var(--amber); }
+  .b-quota { background:rgba(242,109,109,.15); color:var(--red); }
+  .b-busy { background:rgba(90,169,255,.15); color:var(--blue); }
+  .b-rate { background:rgba(245,165,36,.15); color:var(--amber); }
+  .b-disabled { background:rgba(154,163,178,.15); color:var(--muted); }
+  .mono { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; }
+  .bar { height:6px; background:var(--panel2); border-radius:3px; overflow:hidden; margin-top:4px; min-width:80px; }
+  .bar > div { height:100%; background:var(--green); }
+  .bar > div.warn { background:var(--amber); }
+  .bar > div.crit { background:var(--red); }
+  button, .btn { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover, .btn:hover { border-color:var(--muted); }
+  button.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+  button.danger { color:var(--red); }
+  button:disabled { opacity:.45; cursor:default; }
+  .ok { color:var(--green); } .err { color:var(--red); }
+  .err-cell { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .filters { display:flex; flex-wrap:wrap; gap:10px; align-items:end; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:14px; }
+  .filters label { display:block; font-size:12px; color:var(--muted); margin-bottom:3px; }
+  .filters input, .filters select { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:13px; }
+  .pager { display:flex; gap:10px; align-items:center; margin-top:12px; }
+  .pager .info { color:var(--muted); font-size:13px; }
+  /* modal */
+  .modal-back { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); align-items:flex-start; justify-content:center; padding:60px 16px; z-index:10; }
+  .modal-back.open { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; width:520px; max-width:100%; padding:20px; }
+  .modal h3 { margin:0 0 14px; }
+  .field { margin-bottom:12px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:3px; }
+  .field input, .field select { width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:13px; }
+  .field .hint { font-size:12px; color:var(--muted); margin-top:2px; }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .rl-row { display:flex; gap:8px; margin-bottom:6px; }
+  .rl-row input { flex:1; background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:13px; }
+  .modal .actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+  .toast { position:fixed; bottom:20px; right:20px; background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 16px; display:none; z-index:20; }
+  .toast.show { display:block; }
+  .toast.err { border-color:var(--red); color:var(--red); }
+  .live-on { color:var(--green); font-weight:600; }
+  .live-off { color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav>
+    <h1>LLM Gateway</h1>
+    <div class="sub" id="upstream"></div>
+    <a href="#/dashboard" data-page="dashboard">Dashboard</a>
+    <a href="#/keys" data-page="keys">Keys <span class="count" id="nav-key-count"></span></a>
+    <a href="#/logs" data-page="logs">Logs</a>
+    <a href="#/models" data-page="models">Model Map</a>
+    <div style="margin-top:24px; padding:0 12px; font-size:12px;" class="muted"><span id="live-dot" class="live-off">○ connecting…</span><br><span id="clock"></span></div>
+  </nav>
+  <main>
+    <section class="page" id="page-dashboard">
+      <div class="page-head"><h2>Dashboard</h2><span class="spacer"></span><span class="muted" id="dash-range">last 24h</span></div>
+      <div class="cards">
+        <div class="card"><div class="label">Requests (24h)</div><div class="value" id="st-total">–</div></div>
+        <div class="card"><div class="label">Errors (24h)</div><div class="value" id="st-errors">–</div></div>
+        <div class="card"><div class="label">Tokens (24h)</div><div class="value" id="st-tokens">–</div></div>
+        <div class="card"><div class="label">Keys ready</div><div class="value" id="st-ready">–</div></div>
+        <div class="card"><div class="label">Keys in flight</div><div class="value" id="st-flight">–</div></div>
+      </div>
+      <h3>Token usage by key (24h)</h3>
+      <table id="tokens-by-key">
+        <thead><tr><th>Key</th><th>Requests</th><th>Errors</th><th>Prompt tokens</th><th>Completion tokens</th><th>Total tokens</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Recent requests</h3>
+      <table id="dash-logs">
+        <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Error</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="page" id="page-keys">
+      <div class="page-head"><h2>Keys</h2><span class="muted">priority order — first usable key wins</span><span class="spacer"></span><button class="primary" onclick="openKeyModal()">+ Add key</button></div>
+      <table id="keys">
+        <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Proxy</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="page" id="page-logs">
+      <div class="page-head"><h2>Logs</h2><span class="spacer"></span><span class="muted" id="logs-total"></span></div>
+      <div class="filters">
+        <div><label>From</label><input type="datetime-local" id="f-from"></div>
+        <div><label>To</label><input type="datetime-local" id="f-to"></div>
+        <div><label>Key</label><select id="f-key"><option value="">all keys</option></select></div>
+        <div><label>Model</label><input type="text" id="f-model" placeholder="gpt-4o-mini" size="14"></div>
+        <div><label>Status</label><select id="f-status"><option value="">any</option><option value="200">200</option><option value="400">400</option><option value="401">401</option><option value="429">429</option><option value="500">500</option><option value="502">502</option></select></div>
+        <div><label><input type="checkbox" id="f-errors"> errors only</label></div>
+        <div><label>Page size</label><select id="f-limit"><option>25</option><option selected>50</option><option>100</option></select></div>
+        <button class="primary" onclick="applyLogFilters()">Apply</button>
+        <button onclick="resetLogFilters()">Reset</button>
+      </div>
+      <table id="logs">
+        <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Stream</th><th>Error</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="pager">
+        <button id="pg-prev" onclick="logPage(-1)">← Prev</button>
+        <span class="info" id="pg-info"></span>
+        <button id="pg-next" onclick="logPage(1)">Next →</button>
+      </div>
+    </section>
+
+    <section class="page" id="page-models">
+      <div class="page-head"><h2>Model Map</h2><span class="muted">requested model → upstream model</span></div>
+      <div class="filters">
+        <div><label>Requested model</label><input type="text" id="mm-from" placeholder="cheap" size="18"></div>
+        <div><label>Upstream model</label><input type="text" id="mm-to" placeholder="gpt-4o-mini" size="18"></div>
+        <button class="primary" onclick="addMapping()">Add / Update</button>
+      </div>
+      <table id="mappings">
+        <thead><tr><th>Requested</th><th>Upstream</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<div class="modal-back" id="key-modal-back">
+  <div class="modal">
+    <h3 id="key-modal-title">Add key</h3>
+    <input type="hidden" id="km-id-original">
+    <div class="row2">
+      <div class="field"><label>Name *</label><input id="km-name" placeholder="Main account"></div>
+      <div class="field"><label>ID</label><input id="km-id" placeholder="auto from name"><div class="hint">unique, lowercase; empty = auto</div></div>
+    </div>
+    <div class="field"><label>API key <span id="km-key-hint">*</span></label><input id="km-apikey" type="password" placeholder="sk-..." autocomplete="off"><div class="hint" id="km-key-note">stored in SQLite, never shown in full.</div></div>
+    <div class="field"><label>Proxy</label><input id="km-proxy" placeholder="http://user:pass@host:port (empty = direct)"></div>
+    <div class="row2">
+      <div class="field"><label>Priority</label><input id="km-priority" type="number" value="1" min="1"><div class="hint">lower = tried first</div></div>
+      <div class="field"><label>Max concurrency</label><input id="km-conc" type="number" value="5" min="0"><div class="hint">0 = unlimited</div></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="km-enabled" checked> Enabled</label></div>
+    <div class="field"><label>Rate limits</label><div id="km-rl"></div><button type="button" onclick="addRlRow()">+ Add limit</button></div>
+    <div class="actions">
+      <button onclick="closeKeyModal()">Cancel</button>
+      <button class="primary" onclick="saveKey()">Save</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+const badgeClass = r => ({ready:'b-ready',cooldown:'b-cooldown','quota-exhausted':'b-quota',busy:'b-busy','rate-limited':'b-rate',disabled:'b-disabled'}[r] || 'b-disabled');
+let keysCache = [];
+let logOffset = 0, logTotal = 0;
+let currentStats = null;
+let live = false, pollTimer = null, es = null;
+
+function toast(msg, isErr) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  setTimeout(() => t.className = 'toast', 3500);
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function currentPage() { return (location.hash || '#/dashboard').replace('#/', '') || 'dashboard'; }
+function showPage() {
+  const p = currentPage();
+  $$('.page').forEach(el => el.classList.toggle('active', el.id === 'page-' + p));
+  $$('nav a').forEach(a => a.classList.toggle('active', a.dataset.page === p));
+  if (p === 'dashboard') loadDashboard();
+  if (p === 'keys') loadKeys();
+  if (p === 'logs') loadLogs();
+  if (p === 'models') loadMappings();
+}
+window.addEventListener('hashchange', showPage);
+
+function renderKeys(data) {
+  keysCache = data.keys || [];
+  $('#nav-key-count').textContent = keysCache.length + ' keys';
+  const tb = $('#keys tbody');
+  let ready = 0, flight = 0;
+  tb.innerHTML = keysCache.map(k => {
+    if (k.skip_reason === 'ready') ready++;
+    flight += k.in_flight;
+    const rl = (k.rate_limits || []).map(r => {
+      const used = r.max - r.remaining;
+      const pct = Math.round(used / r.max * 100);
+      const cls = pct >= 100 ? 'crit' : pct >= 70 ? 'warn' : '';
+      return `<div>${used}/${r.max} per ${r.window}<div class="bar"><div class="${cls}" style="width:${pct}%"></div></div></div>`;
+    }).join('') || '<span class="muted">none</span>';
+    const cd = [k.cooldown_until, k.quota_reset_at].filter(Boolean).join('<br>') || '<span class="muted">—</span>';
+    return `<tr>
+      <td><strong>${esc(k.name || k.id)}</strong></td>
+      <td class="mono">${esc(k.id)}<br><span class="muted">${esc(k.api_key_masked || '')}</span></td>
+      <td>${k.priority}</td>
+      <td><span class="badge ${badgeClass(k.skip_reason)}">${esc(k.skip_reason || 'ready')}</span></td>
+      <td>${k.in_flight}${k.max_concurrency ? ' / ' + k.max_concurrency : ''}</td>
+      <td>${rl}</td>
+      <td>${k.total_requests} / <span class="${k.total_errors ? 'err' : ''}">${k.total_errors}</span></td>
+      <td class="mono">${cd}</td>
+      <td class="mono muted">${k.proxy ? esc(k.proxy.replace(/:\/\/[^@]+@/, '://***@')) : 'direct'}</td>
+      <td style="white-space:nowrap">
+        <button onclick="openKeyModal('${esc(k.id)}')">Edit</button>
+        <button onclick="toggleKey('${esc(k.id)}', ${!k.enabled})">${k.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="danger" onclick="deleteKey('${esc(k.id)}', '${esc(k.name || k.id)}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+  $('#st-ready').textContent = ready + ' / ' + keysCache.length;
+  $('#st-flight').textContent = flight;
+  return { ready, flight };
+}
+async function loadKeys() {
+  const data = await api('/api/keys');
+  renderKeys(data);
+  const sel = $('#f-key'), cur = sel.value;
+  sel.innerHTML = '<option value="">all keys</option>' + keysCache.map(k => `<option value="${esc(k.id)}">${esc(k.name || k.id)} (${esc(k.id)})</option>`).join('');
+  sel.value = cur;
+}
+async function toggleKey(id, enabled) {
+  try { await api(`/api/keys/toggle?id=${encodeURIComponent(id)}&enabled=${enabled}`, {method:'POST'}); loadKeys(); }
+  catch (e) { toast(e.message, true); }
+}
+async function deleteKey(id, name) {
+  if (!confirm(`Delete key "${name}" (${id})?`)) return;
+  try { await api(`/api/keys?id=${encodeURIComponent(id)}`, {method:'DELETE'}); toast('Key deleted'); loadKeys(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function rlRow(max, win) {
+  const div = document.createElement('div');
+  div.className = 'rl-row';
+  div.innerHTML = `<input type="number" min="1" placeholder="max" value="${max ?? ''}"><input type="text" placeholder="window (1m, 1h, 1d)" value="${esc(win ?? '')}"><button type="button" onclick="this.parentElement.remove()">✕</button>`;
+  return div;
+}
+function addRlRow(max, win) { $('#km-rl').appendChild(rlRow(max, win)); }
+function openKeyModal(id) {
+  const editing = !!id;
+  const k = editing ? keysCache.find(x => x.id === id) : null;
+  $('#key-modal-title').textContent = editing ? 'Edit key' : 'Add key';
+  $('#km-id-original').value = id || '';
+  $('#km-name').value = k ? (k.name || '') : '';
+  $('#km-id').value = k ? k.id : '';
+  $('#km-id').disabled = editing;
+  $('#km-apikey').value = '';
+  $('#km-apikey').placeholder = editing ? '(leave empty to keep current key)' : 'sk-...';
+  $('#km-key-hint').textContent = editing ? '' : '*';
+  $('#km-proxy').value = k ? (k.proxy || '') : '';
+  $('#km-priority').value = k ? k.priority : 1;
+  $('#km-conc').value = k ? k.max_concurrency : 5;
+  $('#km-enabled').checked = k ? k.enabled : true;
+  $('#km-rl').innerHTML = '';
+  if (k && k.rate_limits && k.rate_limits.length) k.rate_limits.forEach(r => addRlRow(r.max, r.window));
+  else addRlRow(5, '1m');
+  $('#key-modal-back').classList.add('open');
+}
+function closeKeyModal() { $('#key-modal-back').classList.remove('open'); }
+async function saveKey() {
+  const editing = !!$('#km-id-original').value;
+  const rls = [...$('#km-rl').children].map(row => {
+    const [maxEl, winEl] = row.querySelectorAll('input');
+    return { max: parseInt(maxEl.value, 10), window: winEl.value.trim() };
+  }).filter(r => r.window && r.max > 0);
+  const body = {
+    id: $('#km-id').value.trim(),
+    name: $('#km-name').value.trim(),
+    api_key: $('#km-apikey').value.trim(),
+    proxy: $('#km-proxy').value.trim(),
+    priority: parseInt($('#km-priority').value, 10) || 1,
+    max_concurrency: parseInt($('#km-conc').value, 10) || 0,
+    enabled: $('#km-enabled').checked,
+    rate_limits: rls,
+  };
+  if (!body.name) return toast('Name is required', true);
+  if (!editing && !body.api_key) return toast('API key is required', true);
+  try {
+    if (editing) await api(`/api/keys?id=${encodeURIComponent($('#km-id-original').value)}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    else await api('/api/keys', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    closeKeyModal(); toast(editing ? 'Key updated' : 'Key added'); loadKeys();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderStats(stats) {
+  currentStats = stats;
+  $('#st-total').textContent = stats.total_requests ?? 0;
+  $('#st-errors').textContent = stats.total_errors ?? 0;
+  $('#st-tokens').textContent = (stats.total_tokens ?? 0).toLocaleString();
+  $('#tokens-by-key tbody').innerHTML = (stats.tokens_by_key || []).map(t => `<tr data-key="${esc(t.key_id)}">
+    <td><strong>${esc(t.key_name)}</strong> <span class="muted mono">${esc(t.key_id)}</span></td>
+    <td class="c-req">${t.requests}</td><td class="c-err ${t.errors ? 'err' : ''}">${t.errors}</td>
+    <td class="c-pt">${t.prompt_tokens.toLocaleString()}</td><td class="c-ct">${t.completion_tokens.toLocaleString()}</td>
+    <td class="c-tt"><strong>${t.total_tokens.toLocaleString()}</strong></td></tr>`).join('')
+    || '<tr><td colspan="6" class="muted">no requests in the last 24h</td></tr>';
+}
+async function loadDashboard() {
+  const [stats, logs] = await Promise.all([api('/api/stats'), api('/api/logs?limit=10')]);
+  renderStats(stats);
+  renderLogRows($('#dash-logs tbody'), logs.logs || [], 10);
+}
+function logRowHtml(l, withStream) {
+  return `<tr>
+    <td class="mono">${new Date(l.ts).toLocaleString()}</td>
+    <td class="mono">${esc(l.key_id || '—')}</td>
+    <td class="mono">${esc(l.model_requested)}${l.model_upstream !== l.model_requested ? ' → ' + esc(l.model_upstream) : ''}</td>
+    <td class="${l.status >= 400 ? 'err' : 'ok'}">${l.status}</td>
+    <td>${l.latency_ms} ms</td>
+    <td>${l.total_tokens || '—'}</td>
+    ${withStream ? `<td>${l.stream ? 'yes' : 'no'}</td>` : ''}
+    <td class="err-cell muted" title="${esc(l.error || '')}">${esc(l.error || '')}</td>
+  </tr>`;
+}
+function renderLogRows(tbody, logs, maxRows) {
+  const withStream = tbody.closest('table').querySelectorAll('th').length === 8;
+  tbody.innerHTML = logs.slice(0, maxRows || logs.length).map(l => logRowHtml(l, withStream)).join('') || `<tr><td colspan="8" class="muted">no requests</td></tr>`;
+}
+
+function logQuery(offset) {
+  const p = new URLSearchParams();
+  const from = $('#f-from').value, to = $('#f-to').value;
+  if (from) p.set('from', from);
+  if (to) p.set('to', to);
+  const key = $('#f-key').value; if (key) p.set('key_id', key);
+  const model = $('#f-model').value.trim(); if (model) p.set('model', model);
+  const status = $('#f-status').value; if (status) p.set('status', status);
+  if ($('#f-errors').checked) p.set('errors', 'true');
+  p.set('limit', $('#f-limit').value);
+  p.set('offset', offset);
+  return p.toString();
+}
+function renderLogsPage(data) {
+  logTotal = data.total || 0;
+  const limit = data.limit || 50;
+  renderLogRows($('#logs tbody'), data.logs || []);
+  const pages = Math.max(1, Math.ceil(logTotal / limit));
+  const page = Math.floor((data.offset || 0) / limit) + 1;
+  $('#pg-info').textContent = `page ${page} of ${pages} — ${logTotal.toLocaleString()} total`;
+  $('#logs-total').textContent = logTotal.toLocaleString() + ' entries';
+  $('#pg-prev').disabled = (data.offset || 0) <= 0;
+  $('#pg-next').disabled = (data.offset || 0) + limit >= logTotal;
+}
+async function loadLogs() {
+  const data = await api('/api/logs?' + logQuery(logOffset));
+  renderLogsPage(data);
+}
+function logPage(d) {
+  const limit = parseInt($('#f-limit').value, 10) || 50;
+  logOffset = Math.max(0, logOffset + d * limit);
+  loadLogs();
+}
+function applyLogFilters() { logOffset = 0; loadLogs(); }
+function resetLogFilters() {
+  $('#f-from').value = ''; $('#f-to').value = ''; $('#f-key').value = '';
+  $('#f-model').value = ''; $('#f-status').value = ''; $('#f-errors').checked = false;
+  logOffset = 0; loadLogs();
+}
+function logMatchesFilters(l) {
+  const from = $('#f-from').value, to = $('#f-to').value;
+  const ts = new Date(l.ts).getTime();
+  if (from && ts < new Date(from).getTime()) return false;
+  if (to && ts > new Date(to).getTime()) return false;
+  const key = $('#f-key').value;
+  if (key && l.key_id !== key) return false;
+  const model = $('#f-model').value.trim();
+  if (model && l.model_requested !== model && l.model_upstream !== model) return false;
+  const status = $('#f-status').value;
+  if (status && String(l.status) !== status) return false;
+  if ($('#f-errors').checked && l.status < 400) return false;
+  return true;
+}
+
+async function loadMappings() {
+  const data = await api('/api/model-map');
+  const m = data.model_map || {};
+  $('#mappings tbody').innerHTML = Object.entries(m).map(([from, to]) => `<tr>
+    <td class="mono">${esc(from)}</td><td class="mono">${esc(to)}</td>
+    <td><button class="danger" onclick="deleteMapping('${esc(from)}')">Delete</button></td></tr>`).join('')
+    || '<tr><td colspan="3" class="muted">no mappings — models pass through unchanged</td></tr>';
+}
+async function addMapping() {
+  const from = $('#mm-from').value.trim(), to = $('#mm-to').value.trim();
+  if (!from || !to) return toast('Both fields are required', true);
+  try {
+    await api('/api/model-map', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({requested: from, upstream: to})});
+    $('#mm-from').value = ''; $('#mm-to').value = '';
+    toast('Mapping saved'); loadMappings();
+  } catch (e) { toast(e.message, true); }
+}
+async function deleteMapping(from) {
+  if (!confirm(`Delete mapping "${from}"?`)) return;
+  try { await api('/api/model-map?requested=' + encodeURIComponent(from), {method:'DELETE'}); toast('Mapping deleted'); loadMappings(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function applyLogEvent(l) {
+  if (currentStats) {
+    currentStats.total_requests = (currentStats.total_requests || 0) + 1;
+    if (l.status >= 400) currentStats.total_errors = (currentStats.total_errors || 0) + 1;
+    currentStats.total_tokens = (currentStats.total_tokens || 0) + (l.total_tokens || 0);
+    $('#st-total').textContent = currentStats.total_requests;
+    $('#st-errors').textContent = currentStats.total_errors;
+    $('#st-tokens').textContent = currentStats.total_tokens.toLocaleString();
+    const row = document.querySelector(`#tokens-by-key tr[data-key="${CSS.escape(l.key_id)}"]`);
+    if (row) {
+      const bump = (sel, n) => { const el = row.querySelector(sel); if (el) el.textContent = (parseInt(el.textContent.replace(/,/g, ''), 10) || 0) + n; };
+      bump('.c-req', 1);
+      if (l.status >= 400) bump('.c-err', 1);
+      bump('.c-pt', l.prompt_tokens || 0);
+      bump('.c-ct', l.completion_tokens || 0);
+      bump('.c-tt', l.total_tokens || 0);
+    } else if (l.key_id) {
+      api('/api/stats').then(renderStats).catch(() => {});
+    }
+  }
+  if (currentPage() === 'dashboard') {
+    const tb = $('#dash-logs tbody');
+    tb.insertAdjacentHTML('afterbegin', logRowHtml(l, false));
+    while (tb.rows.length > 10) tb.deleteRow(-1);
+    const empty = tb.querySelector('td[colspan]');
+    if (empty) empty.parentElement.remove();
+  }
+  if (currentPage() === 'logs') {
+    logTotal++;
+    $('#logs-total').textContent = logTotal.toLocaleString() + ' entries';
+    if (logOffset === 0 && logMatchesFilters(l)) {
+      const tb = $('#logs tbody');
+      tb.insertAdjacentHTML('afterbegin', logRowHtml(l, true));
+      const empty = tb.querySelector('td[colspan]');
+      if (empty) empty.parentElement.remove();
+      const limit = parseInt($('#f-limit').value, 10) || 50;
+      while (tb.rows.length > limit) tb.deleteRow(-1);
+      const pages = Math.max(1, Math.ceil(logTotal / limit));
+      $('#pg-info').textContent = `page 1 of ${pages} — ${logTotal.toLocaleString()} total`;
+      $('#pg-next').disabled = limit >= logTotal;
+    } else {
+      const limit = parseInt($('#f-limit').value, 10) || 50;
+      const pages = Math.max(1, Math.ceil(logTotal / limit));
+      const page = Math.floor(logOffset / limit) + 1;
+      $('#pg-info').textContent = `page ${page} of ${pages} — ${logTotal.toLocaleString()} total`;
+      $('#pg-next').disabled = logOffset + limit >= logTotal;
+    }
+  }
+}
+function setLive(on) {
+  live = on;
+  const dot = $('#live-dot');
+  dot.textContent = on ? '● LIVE' : '○ offline — polling';
+  dot.className = on ? 'live-on' : 'live-off';
+  if (on) stopPolling(); else startPolling();
+}
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    const p = currentPage();
+    if (p === 'dashboard') loadDashboard();
+    else if (p === 'keys') loadKeys();
+    else if (p === 'logs') loadLogs();
+  }, 5000);
+}
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+function connectSSE() {
+  if (!('EventSource' in window)) { setLive(false); return; }
+  es = new EventSource('/api/events');
+  es.addEventListener('log', e => {
+    try { applyLogEvent(JSON.parse(e.data)); } catch (_) {}
+  });
+  es.addEventListener('keys', e => {
+    try { renderKeys(JSON.parse(e.data)); } catch (_) {}
+  });
+  es.addEventListener('stats', e => {
+    try { renderStats(JSON.parse(e.data)); } catch (_) {}
+  });
+  es.onopen = () => setLive(true);
+  es.onerror = () => setLive(false);
+}
+
+async function loadConfig() {
+  const c = await api('/api/config');
+  $('#upstream').textContent = 'upstream: ' + c.upstream;
+}
+function tickClock() { $('#clock').textContent = new Date().toLocaleTimeString(); }
+loadConfig(); showPage(); connectSSE();
+setInterval(tickClock, 1000); tickClock();
+setInterval(() => { if (live && currentPage() === 'dashboard') api('/api/stats').then(renderStats).catch(() => {}); }, 30000);
+</script>
+</body>
+</html>
