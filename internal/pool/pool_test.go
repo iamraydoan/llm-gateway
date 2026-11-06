@@ -263,6 +263,31 @@ func TestReportFailureBackoffMax(t *testing.T) {
 	}
 }
 
+func TestCustomBackoff(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+	})
+	p.SetBackoff(2*time.Second, 3, 10*time.Second)
+	k := p.Find("k1")
+	now := time.Now()
+	k.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	if secs := k.Status(now).RetryInSeconds; secs < 1 || secs > 2 {
+		t.Fatalf("1st failure retry = %ds, want ~2s", secs)
+	}
+	k.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	if secs := k.Status(now).RetryInSeconds; secs < 5 || secs > 6 {
+		t.Fatalf("2nd failure retry = %ds, want ~6s", secs)
+	}
+	k.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	if secs := k.Status(now).RetryInSeconds; secs < 9 || secs > 10 {
+		t.Fatalf("3rd failure retry = %ds, want ~10s (capped)", secs)
+	}
+	k.ReportFailure(429, 0, false, time.Time{}, "rate limited")
+	if secs := k.Status(now).RetryInSeconds; secs < 9 || secs > 10 {
+		t.Fatalf("4th failure retry = %ds, want ~10s (still capped)", secs)
+	}
+}
+
 func TestConcurrentAcquireHoldsLimit(t *testing.T) {
 	p := testPool(t, []config.Key{
 		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true, MaxConcurrency: 3},

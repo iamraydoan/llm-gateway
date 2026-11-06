@@ -78,11 +78,18 @@ func (k Key) MaskedAPIKey() string {
 	return k.APIKey[:3] + "…****" + k.APIKey[len(k.APIKey)-4:]
 }
 
+type Backoff struct {
+	BaseSeconds int     `yaml:"base_seconds"`
+	Multiplier  float64 `yaml:"multiplier"`
+	MaxSeconds  int     `yaml:"max_seconds"`
+}
+
 type Server struct {
-	Listen       string `yaml:"listen"`
-	MasterKey    string `yaml:"master_key"`
-	DBPath       string `yaml:"db_path"`
-	MaxFailovers int    `yaml:"max_failovers"`
+	Listen       string  `yaml:"listen"`
+	MasterKey    string  `yaml:"master_key"`
+	DBPath       string  `yaml:"db_path"`
+	MaxFailovers int     `yaml:"max_failovers"`
+	Backoff      Backoff `yaml:"backoff"`
 }
 
 type ErrorRule struct {
@@ -185,6 +192,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MaxFailovers <= 0 {
 		c.Server.MaxFailovers = 10
+	}
+	if c.Server.Backoff.BaseSeconds <= 0 {
+		c.Server.Backoff.BaseSeconds = 5
+	}
+	if c.Server.Backoff.Multiplier <= 0 {
+		c.Server.Backoff.Multiplier = 2
+	}
+	if c.Server.Backoff.MaxSeconds <= 0 {
+		c.Server.Backoff.MaxSeconds = 600
+	}
+	if c.Server.Backoff.Multiplier < 1 {
+		return fmt.Errorf("config: server.backoff.multiplier must be at least 1, got %v", c.Server.Backoff.Multiplier)
+	}
+	if c.Server.Backoff.MaxSeconds < c.Server.Backoff.BaseSeconds {
+		return fmt.Errorf("config: server.backoff.max_seconds (%d) must be at least base_seconds (%d)", c.Server.Backoff.MaxSeconds, c.Server.Backoff.BaseSeconds)
 	}
 	for _, f := range []string{"id", "name", "api_key"} {
 		if c.KeyDefaults.set[f] {

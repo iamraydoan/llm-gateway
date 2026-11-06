@@ -236,3 +236,62 @@ keys:
 		}
 	}
 }
+
+func TestBackoffConfig(t *testing.T) {
+	cfg := parseConfig(t, `
+server:
+  listen: ":8080"
+  backoff:
+    base_seconds: 2
+    multiplier: 3
+    max_seconds: 30
+upstream:
+  base_url: "https://api.openai.com"
+keys:
+  - "sk-test"
+`)
+	if b := cfg.Server.Backoff; b.BaseSeconds != 2 || b.Multiplier != 3 || b.MaxSeconds != 30 {
+		t.Fatalf("backoff = %+v, want base 2 mult 3 max 30", b)
+	}
+	def := parseConfig(t, `
+server:
+  listen: ":8080"
+upstream:
+  base_url: "https://api.openai.com"
+keys:
+  - "sk-test"
+`)
+	if b := def.Server.Backoff; b.BaseSeconds != 5 || b.Multiplier != 2 || b.MaxSeconds != 600 {
+		t.Fatalf("default backoff = %+v, want base 5 mult 2 max 600", b)
+	}
+	for _, bad := range []string{
+		`
+server:
+  listen: ":8080"
+  backoff:
+    base_seconds: 5
+    multiplier: 0.5
+    max_seconds: 600
+keys:
+  - "sk-test"
+`,
+		`
+server:
+  listen: ":8080"
+  backoff:
+    base_seconds: 30
+    multiplier: 2
+    max_seconds: 10
+keys:
+  - "sk-test"
+`,
+	} {
+		var cfg Config
+		if err := yaml.Unmarshal([]byte(bad), &cfg); err != nil {
+			t.Fatalf("yaml: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("validate(%q) = nil, want error", bad)
+		}
+	}
+}

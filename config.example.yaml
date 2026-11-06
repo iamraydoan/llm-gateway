@@ -7,6 +7,17 @@ server:
   # network) the failing key goes into cooldown backoff and the request
   # jumps to the next key immediately (no waiting). 0 = default 10.
   max_failovers: 10
+  # Optional: failure backoff per key. After each consecutive failure a
+  # key cools down for base_seconds, then base * multiplier, doubling
+  # each time until max_seconds (the ceiling). A success resets the
+  # ladder to base_seconds. The effective cooldown is the largest of
+  # this backoff, the upstream Retry-After header, and the quota reset
+  # wait; error_rules cooldown_seconds can extend it further.
+  # Defaults: base 5s, multiplier 2, max 600s (10 minutes).
+  backoff:
+    base_seconds: 5
+    multiplier: 2
+    max_seconds: 600
   # Optional: SQLite path for request logs.
   # Default: gateway.db next to config.yaml. Env LLM_GATEWAY_DB wins.
   # db_path: "/app/data/gateway.db"

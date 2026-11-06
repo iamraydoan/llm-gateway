@@ -54,6 +54,11 @@ func New(cfg *config.Config, p *pool.Pool, s *store.Store, modelMap map[string]s
 	}
 	g.hub = NewHub(g.keysSnapshot)
 
+	p.SetBackoff(
+		time.Duration(cfg.Server.Backoff.BaseSeconds)*time.Second,
+		cfg.Server.Backoff.Multiplier,
+		time.Duration(cfg.Server.Backoff.MaxSeconds)*time.Second,
+	)
 	p.SetStatusChangeHook(func() { g.hub.NotifyKeys() })
 	return g
 }

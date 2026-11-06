@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	baseBackoff = 5 * time.Second
-	maxBackoff  = 10 * time.Minute
+	defaultBackoffBase = 5 * time.Second
+	defaultBackoffMult = 2
+	defaultBackoffMax  = 10 * time.Minute
 )
 
 type ErrNoKeyAvailable struct {
@@ -97,6 +98,9 @@ type Key struct {
 	quotaResetAt  time.Time
 	fails         int // consecutive failures, drives exponential backoff
 	inFlight      int
+	backoffBase   time.Duration
+	backoffMult   float64
+	backoffMax    time.Duration
 
 	TotalRequests int
 	TotalErrors   int
@@ -113,7 +117,12 @@ type Key struct {
 }
 
 func newKey(cfg config.Key, timeout time.Duration) (*Key, error) {
-	k := &Key{cfg: cfg}
+	k := &Key{
+		cfg:         cfg,
+		backoffBase: defaultBackoffBase,
+		backoffMult: defaultBackoffMult,
+		backoffMax:  defaultBackoffMax,
+	}
 	if cfg.MaxConcurrency > 0 {
 		k.sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
@@ -318,7 +327,7 @@ func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted
 	k.LastError = detail
 	now := time.Now()
 	k.LastErrorAt = now
-	delay := backoffDelay(k.fails)
+	delay := k.backoffDelay(k.fails)
 	if retryAfter > delay {
 		delay = retryAfter
 	}
@@ -341,15 +350,15 @@ func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted
 	}
 }
 
-func backoffDelay(fails int) time.Duration {
+func (k *Key) backoffDelay(fails int) time.Duration {
 	if fails <= 0 {
-		return baseBackoff
+		return k.backoffBase
 	}
-	d := baseBackoff
+	d := k.backoffBase
 	for i := 1; i < fails; i++ {
-		d *= 2
-		if d >= maxBackoff {
-			return maxBackoff
+		d = time.Duration(float64(d) * k.backoffMult)
+		if d >= k.backoffMax {
+			return k.backoffMax
 		}
 	}
 	return d
@@ -444,8 +453,41 @@ func (p *Pool) SetStatusChangeHook(fn func()) {
 	}
 }
 
+func (p *Pool) SetBackoff(base time.Duration, mult float64, max time.Duration) {
+	if base <= 0 {
+		base = defaultBackoffBase
+	}
+	if mult < 1 {
+		mult = defaultBackoffMult
+	}
+	if max <= 0 {
+		max = defaultBackoffMax
+	}
+	if max < base {
+		max = base
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, k := range p.keys {
+		k.mu.Lock()
+		k.backoffBase = base
+		k.backoffMult = mult
+		k.backoffMax = max
+		k.mu.Unlock()
+	}
+}
+
 func New(cfg *config.Config) (*Pool, error) {
-	return NewFromKeys(cfg.Keys, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+	p, err := NewFromKeys(cfg.Keys, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	p.SetBackoff(
+		time.Duration(cfg.Server.Backoff.BaseSeconds)*time.Second,
+		cfg.Server.Backoff.Multiplier,
+		time.Duration(cfg.Server.Backoff.MaxSeconds)*time.Second,
+	)
+	return p, nil
 }
 
 func NewFromKeys(keys []config.Key, timeout time.Duration) (*Pool, error) {

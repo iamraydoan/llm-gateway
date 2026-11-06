@@ -317,6 +317,11 @@ func (g *Gateway) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		"relay_url": g.cfg.Upstream.RelayURL,
 		"model_map": g.ModelMap(),
 		"listen":    g.cfg.Server.Listen,
+		"backoff": map[string]any{
+			"base_seconds": g.cfg.Server.Backoff.BaseSeconds,
+			"multiplier":   g.cfg.Server.Backoff.Multiplier,
+			"max_seconds":  g.cfg.Server.Backoff.MaxSeconds,
+		},
 	})
 }
 

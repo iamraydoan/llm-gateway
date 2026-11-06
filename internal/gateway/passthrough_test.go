@@ -1342,6 +1342,60 @@ func newTestGatewayWithRules(t *testing.T, upstreamURL string, keys []config.Key
 	return srv, st
 }
 
+func newTestGatewayWithBackoff(t *testing.T, upstreamURL string, keys []config.Key, backoff config.Backoff) (*httptest.Server, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	cfg := &config.Config{}
+	cfg.Server.Listen = ":0"
+	cfg.Server.MaxFailovers = 10
+	cfg.Server.Backoff = backoff
+	cfg.Upstream.BaseURL = upstreamURL
+	cfg.Upstream.TimeoutSeconds = 5
+	cfg.Keys = keys
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	p, err := pool.NewFromKeys(cfg.Keys, 5*time.Second)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	gw := New(cfg, p, st, nil)
+	srv := httptest.NewServer(gw.Routes())
+	t.Cleanup(srv.Close)
+	return srv, st
+}
+
+func TestGatewayBackoffConfig(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	up.behaviors["tok-bad"] = errJSON(500, `{"error":{"message":"boom"}}`, nil)
+	gw, _ := newTestGatewayWithBackoff(t, srv.URL, []config.Key{
+		{ID: "only", APIKey: "tok-bad", Priority: 1, Enabled: true},
+	}, config.Backoff{BaseSeconds: 2, Multiplier: 3, MaxSeconds: 30})
+	defer gw.Close()
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusInternalServerError {
+		t.Fatalf("1st status = %d, want 500", status)
+	}
+	row := keyRowByID(keysList(t, gw.URL), "only")
+	if retry, _ := row["retry_in_seconds"].(float64); retry < 1 || retry > 2 {
+		t.Fatalf("1st retry_in_seconds = %v, want ~2s", retry)
+	}
+	time.Sleep(2200 * time.Millisecond)
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusInternalServerError {
+		t.Fatalf("2nd status = %d, want 500", status)
+	}
+	row = keyRowByID(keysList(t, gw.URL), "only")
+	if retry, _ := row["retry_in_seconds"].(float64); retry < 5 || retry > 6 {
+		t.Fatalf("2nd retry_in_seconds = %v, want ~6s", retry)
+	}
+}
+
 const freeTierBody = `{"error":{"message":"You've used this period's free allowance. Your next rolling 7-day period starts on 10 Nov 2026 at 02:38 UTC. Use the paid model 'deepseek-v4-flash' to keep going, or subscribe to a Token Harbor Pass for a recurring included allowance across more models. https://tokenharbor.ai/pricing","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`
 
 func TestFreeTierQuotaReset(t *testing.T) {
