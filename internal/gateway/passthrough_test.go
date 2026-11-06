@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -125,6 +126,15 @@ func newTestGateway(t *testing.T, upstreamURL string, keys []config.Key, modelMa
 }
 
 func newTestGatewayWithFailovers(t *testing.T, upstreamURL string, keys []config.Key, modelMap map[string]string, masterKey string, maxFailovers int) (*httptest.Server, *store.Store) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return newTestGatewayWithStore(t, upstreamURL, keys, modelMap, masterKey, maxFailovers, st)
+}
+
+func newTestGatewayWithStore(t *testing.T, upstreamURL string, keys []config.Key, modelMap map[string]string, masterKey string, maxFailovers int, st *store.Store) (*httptest.Server, *store.Store) {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Server.Listen = ":0"
@@ -136,11 +146,6 @@ func newTestGatewayWithFailovers(t *testing.T, upstreamURL string, keys []config
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config validate: %v", err)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("store open: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 	p, err := pool.NewFromKeys(cfg.Keys, 5*time.Second)
 	if err != nil {
 		t.Fatalf("pool: %v", err)
@@ -149,6 +154,31 @@ func newTestGatewayWithFailovers(t *testing.T, upstreamURL string, keys []config
 	srv := httptest.NewServer(gw.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
+}
+
+func keysList(t *testing.T, srvURL string) []map[string]any {
+	t.Helper()
+	resp, err := http.Get(srvURL + "/api/keys")
+	if err != nil {
+		t.Fatalf("keys get: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("keys decode: %v", err)
+	}
+	return out.Keys
+}
+
+func keyRowByID(keys []map[string]any, id string) map[string]any {
+	for _, k := range keys {
+		if k["id"] == id {
+			return k
+		}
+	}
+	return nil
 }
 
 func postChat(t *testing.T, client *http.Client, srvURL, model string, stream bool, masterKey string) (int, []byte) {
@@ -188,9 +218,9 @@ func readAllLogs(t *testing.T, st *store.Store) []store.Entry {
 	return entries
 }
 
-func statsPayload(t *testing.T, srvURL string) map[string]any {
+func statsPayload(t *testing.T, statsURL string) map[string]any {
 	t.Helper()
-	resp, err := http.Get(srvURL + "/api/stats")
+	resp, err := http.Get(statsURL)
 	if err != nil {
 		t.Fatalf("stats get: %v", err)
 	}
@@ -242,7 +272,7 @@ func TestPassthroughRoutesFirstKeyAndMapsModel(t *testing.T) {
 	if e.Status != 200 || e.TotalTokens != 15 || e.PromptTokens != 10 || e.CachedTokens != 4 || e.CompletionTokens != 5 {
 		t.Fatalf("log status/tokens = %d/%d/%d, want 200/15/4", e.Status, e.TotalTokens, e.CachedTokens)
 	}
-	stats := statsPayload(t, gw.URL)
+	stats := statsPayload(t, gw.URL+"/api/stats")
 	if stats["total_prompt_tokens"] != float64(10) || stats["total_cached_tokens"] != float64(4) ||
 		stats["total_completion_tokens"] != float64(5) || stats["total_tokens"] != float64(15) {
 		t.Fatalf("stats tokens = %+v, want prompt 10 cached 4 completion 5 total 15", stats)
@@ -254,6 +284,73 @@ func TestPassthroughRoutesFirstKeyAndMapsModel(t *testing.T) {
 	row := byKey[0].(map[string]any)
 	if row["cached_tokens"] != float64(4) || row["prompt_tokens"] != float64(10) {
 		t.Fatalf("tokens_by_key row = %+v, want cached 4 prompt 10", row)
+	}
+}
+
+func TestAPIStatsRange(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, _ := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true},
+	}, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	now := time.Now()
+	wide := statsPayload(t, gw.URL+"/api/stats?from="+url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339))+"&to="+url.QueryEscape(now.Add(time.Hour).Format(time.RFC3339)))
+	if wide["total_requests"] != float64(1) || wide["total_cached_tokens"] != float64(4) {
+		t.Fatalf("wide range stats = %+v, want 1 request 4 cached", wide)
+	}
+	future := statsPayload(t, gw.URL+"/api/stats?from="+url.QueryEscape(now.Add(24*time.Hour).Format(time.RFC3339)))
+	if future["total_requests"] != float64(0) {
+		t.Fatalf("future range stats = %+v, want 0 requests", future)
+	}
+}
+
+func TestKeysSurviveRestart(t *testing.T) {
+	up := newFakeUpstream()
+	up.behaviors["tok-bad"] = errJSON(429,
+		`{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		map[string]string{"Retry-After": "60"})
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	keys := []config.Key{
+		{ID: "bad", APIKey: "tok-bad", Priority: 1, Enabled: true},
+		{ID: "good", APIKey: "tok-good", Priority: 2, Enabled: true,
+			RateLimits: []config.RateLimitRule{{Max: 2, Window: "1h"}}},
+	}
+	gw1, st := newTestGateway(t, srv.URL, keys, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	if status, _ := postChat(t, client, gw1.URL, "gpt-4o-mini", false, ""); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	gw2, _ := newTestGatewayWithStore(t, srv.URL, keys, nil, "", 0, st)
+	ks := keysList(t, gw2.URL)
+	good := keyRowByID(ks, "good")
+	if good == nil {
+		t.Fatalf("keys = %+v, want good", ks)
+	}
+	if good["total_requests"] != float64(1) {
+		t.Fatalf("good total_requests = %v, want 1 from logs after restart", good["total_requests"])
+	}
+	rl, ok := good["rate_limits"].([]any)
+	if !ok || len(rl) != 1 {
+		t.Fatalf("good rate_limits = %+v, want 1 window", good["rate_limits"])
+	}
+	if rl[0].(map[string]any)["remaining"] != float64(1) {
+		t.Fatalf("good remaining = %+v, want 1 (max 2 minus 1 logged hit)", rl[0])
+	}
+	bad := keyRowByID(ks, "bad")
+	if bad == nil {
+		t.Fatalf("keys = %+v, want bad", ks)
+	}
+	if bad["total_errors"] != float64(1) {
+		t.Fatalf("bad total_errors = %v, want 1 from logs after restart", bad["total_errors"])
+	}
+	if le, _ := bad["last_error"].(string); le == "" || !strings.Contains(le, "Rate limit reached") {
+		t.Fatalf("bad last_error = %q, want raw 429 body from logs", le)
 	}
 }
 

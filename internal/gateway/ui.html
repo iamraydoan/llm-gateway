@@ -55,6 +55,10 @@
   .filters { display:flex; flex-wrap:wrap; gap:10px; align-items:end; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:14px; }
   .filters label { display:block; font-size:12px; color:var(--muted); margin-bottom:3px; }
   .filters input, .filters select { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-size:13px; }
+  .filters button { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; cursor:pointer; }
+  .filters button:hover { border-color:var(--muted); }
+  .presets { display:flex; gap:6px; }
+  .presets button.active { background:var(--blue); border-color:var(--blue); color:#fff; }
   .pager { display:flex; gap:10px; align-items:center; margin-top:12px; }
   .pager .info { color:var(--muted); font-size:13px; }
   /* modal */
@@ -88,6 +92,17 @@
   <main>
     <section class="page" id="page-dashboard">
       <div class="page-head"><h2>Dashboard</h2><span class="spacer"></span><span class="muted" id="dash-range">last 24h</span></div>
+      <div class="filters">
+        <div class="presets">
+          <button data-hours="1">1h</button>
+          <button data-hours="24" class="active">24h</button>
+          <button data-hours="168">7d</button>
+          <button data-hours="720">30d</button>
+        </div>
+        <div><label>From</label><input type="datetime-local" id="d-from"></div>
+        <div><label>To</label><input type="datetime-local" id="d-to"></div>
+        <button id="d-apply">Apply</button>
+      </div>
       <div class="cards">
         <div class="card"><div class="label">Requests (24h)</div><div class="value" id="st-total">–</div></div>
         <div class="card"><div class="label">Errors (24h)</div><div class="value" id="st-errors">–</div></div>
@@ -131,7 +146,7 @@
         <button onclick="resetLogFilters()">Reset</button>
       </div>
       <table id="logs">
-        <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Stream</th><th>Error</th></tr></thead>
+        <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Prompt tokens</th><th>Cached tokens</th><th>Completion tokens</th><th>Total tokens</th><th>Stream</th><th>Error</th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="pager">
@@ -242,10 +257,48 @@ function renderStats(stats) {
     <td class="c-req">${t.requests}</td><td class="c-err ${t.errors ? 'err' : ''}">${t.errors}</td>
     <td class="c-pt">${t.prompt_tokens.toLocaleString()}</td><td class="c-cached">${(t.cached_tokens || 0).toLocaleString()}</td><td class="c-ct">${t.completion_tokens.toLocaleString()}</td>
     <td class="c-tt"><strong>${t.total_tokens.toLocaleString()}</strong></td></tr>`).join('')
-    || '<tr><td colspan="7" class="muted">no requests in the last 24h</td></tr>';
+    || '<tr><td colspan="7" class="muted">no requests in this range</td></tr>';
 }
+let dashHours = 24, dashFrom = '', dashTo = '';
+function statsQuery() {
+  if (dashFrom || dashTo) {
+    const p = new URLSearchParams();
+    if (dashFrom) p.set('from', dashFrom);
+    if (dashTo) p.set('to', dashTo);
+    return p.toString();
+  }
+  return 'hours=' + dashHours;
+}
+function dashRangeLabel() {
+  if (dashFrom || dashTo) return (dashFrom || '…') + ' → ' + (dashTo || 'now');
+  if (dashHours === 24) return 'last 24h';
+  return 'last ' + (dashHours >= 24 ? (dashHours / 24) + 'd' : dashHours + 'h');
+}
+function setDashRange() {
+  $('#dash-range').textContent = dashRangeLabel();
+  const short = (dashFrom || dashTo) ? 'custom' : dashHours === 1 ? '1h' : dashHours === 24 ? '24h' : dashHours === 168 ? '7d' : '30d';
+  $$('#page-dashboard .card .label').forEach(el => { el.textContent = el.textContent.replace(/ \([^)]*\)$/, ' (' + short + ')'); });
+  const h3 = document.querySelector('#page-dashboard h3');
+  if (h3) h3.textContent = h3.textContent.replace(/ \([^)]*\)$/, ' (' + short + ')');
+}
+document.querySelectorAll('#page-dashboard .presets button').forEach(b => {
+  b.addEventListener('click', () => {
+    dashHours = parseInt(b.dataset.hours, 10);
+    dashFrom = ''; dashTo = '';
+    $('#d-from').value = ''; $('#d-to').value = '';
+    document.querySelectorAll('#page-dashboard .presets button').forEach(x => x.classList.toggle('active', x === b));
+    setDashRange(); loadDashboard();
+  });
+});
+$('#d-apply').addEventListener('click', () => {
+  dashFrom = $('#d-from').value; dashTo = $('#d-to').value;
+  if (dashFrom || dashTo) {
+    document.querySelectorAll('#page-dashboard .presets button').forEach(x => x.classList.remove('active'));
+  }
+  setDashRange(); loadDashboard();
+});
 async function loadDashboard() {
-  const [stats, logs] = await Promise.all([api('/api/stats'), api('/api/logs?limit=10')]);
+  const [stats, logs] = await Promise.all([api('/api/stats?' + statsQuery()), api('/api/logs?limit=10')]);
   renderStats(stats);
   renderLogRows($('#dash-logs tbody'), logs.logs || [], 10);
 }
@@ -256,14 +309,16 @@ function logRowHtml(l, withStream) {
     <td class="mono">${esc(l.model_requested)}${l.model_upstream !== l.model_requested ? ' → ' + esc(l.model_upstream) : ''}</td>
     <td class="${l.status >= 400 ? 'err' : 'ok'}">${l.status}</td>
     <td>${l.latency_ms} ms</td>
-    <td>${l.total_tokens || '—'}</td>
+    ${withStream
+      ? `<td>${l.prompt_tokens || '—'}</td><td>${l.cached_tokens || '—'}</td><td>${l.completion_tokens || '—'}</td><td><strong>${l.total_tokens || '—'}</strong></td>`
+      : `<td>${l.total_tokens || '—'}</td>`}
     ${withStream ? `<td>${l.stream ? 'yes' : 'no'}</td>` : ''}
     <td class="err-cell muted" title="${esc(l.error || '')}">${esc(l.error || '')}</td>
   </tr>`;
 }
 function renderLogRows(tbody, logs, maxRows) {
-  const withStream = tbody.closest('table').querySelectorAll('th').length === 8;
-  tbody.innerHTML = logs.slice(0, maxRows || logs.length).map(l => logRowHtml(l, withStream)).join('') || `<tr><td colspan="8" class="muted">no requests</td></tr>`;
+  const withStream = tbody.closest('table').querySelectorAll('th').length === 11;
+  tbody.innerHTML = logs.slice(0, maxRows || logs.length).map(l => logRowHtml(l, withStream)).join('') || `<tr><td colspan="11" class="muted">no requests</td></tr>`;
 }
 
 function logQuery(offset) {
@@ -327,8 +382,15 @@ async function loadMappings() {
     <td class="mono">${esc(from)}</td><td class="mono">${esc(to)}</td></tr>`).join('')
     || '<tr><td colspan="2" class="muted">no mappings — models pass through unchanged</td></tr>';
 }
+function logInDashRange(l) {
+  const ts = new Date(l.ts).getTime();
+  if (dashFrom && ts < new Date(dashFrom).getTime()) return false;
+  if (dashTo && ts > new Date(dashTo).getTime()) return false;
+  if (!dashFrom && !dashTo && ts < Date.now() - dashHours * 3600 * 1000) return false;
+  return true;
+}
 function applyLogEvent(l) {
-  if (currentStats) {
+  if (currentStats && logInDashRange(l)) {
     currentStats.total_requests = (currentStats.total_requests || 0) + 1;
     if (l.status >= 400) currentStats.total_errors = (currentStats.total_errors || 0) + 1;
     currentStats.total_tokens = (currentStats.total_tokens || 0) + (l.total_tokens || 0);
@@ -411,6 +473,7 @@ function connectSSE() {
     try { renderKeys(JSON.parse(e.data)); } catch (_) {}
   });
   es.addEventListener('stats', e => {
+    if (dashFrom || dashTo || dashHours !== 24) return;
     try { renderStats(JSON.parse(e.data)); } catch (_) {}
   });
   es.onopen = () => setLive(true);
@@ -424,7 +487,7 @@ async function loadConfig() {
 function tickClock() { $('#clock').textContent = new Date().toLocaleTimeString(); }
 loadConfig(); showPage(); connectSSE();
 setInterval(tickClock, 1000); tickClock();
-setInterval(() => { if (live && currentPage() === 'dashboard') api('/api/stats').then(renderStats).catch(() => {}); }, 30000);
+setInterval(() => { if (live && currentPage() === 'dashboard') api('/api/stats?' + statsQuery()).then(renderStats).catch(() => {}); }, 30000);
 </script>
 </body>
 </html>

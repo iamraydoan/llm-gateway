@@ -43,16 +43,22 @@ multi-window rate limits.
   polling if the stream drops, plus a 30s full-stats safety refetch):
   - **Dashboard** — request/error cards plus token cards split into
     Input / Cached / Output tokens, token usage per key (by key name,
-    with a Cached column), recent requests.
+    with a Cached column), recent requests. Date filter with presets
+    (1h / 24h / 7d / 30d) or a custom From–To range; card labels follow
+    the selected range.
   - **Keys** — key pool with names, live status, rate-limit bars
     (read-only; keys come from `config.yaml` — edit the file and
     restart to change them). The **Last error** column shows the last
     upstream response body attached to each key, with consecutive
     failure count and retry countdown from the exponential backoff
     (delay = max of backoff, Retry-After, quota reset wait); it clears
-    when the key succeeds again.
+    when the key succeeds again. Requests / Errors, rate-limit usage
+    and last error are rebuilt from the SQLite request log, so they
+    survive a gateway restart (the live cooldown / quota throttle
+    itself is in-memory and resets on restart).
   - **Logs** — request log with date-range filter, key / model / status
     filters, errors-only toggle, and pagination (page size 25/50/100).
+    Each row shows Prompt / Cached / Completion / Total tokens.
     New matching rows prepend live on page 1.
   - **Model Map** — model mappings (read-only, from `config.yaml`).
 
@@ -72,7 +78,7 @@ stores request logs only. API keys are never shown in full in the UI (masked).
 | GET | `/api/model-map` | list mappings (read-only) |
 | GET | `/api/logs?from=&to=&key_id=&model=&status=&errors=&limit=&offset=` | filtered, paginated logs + total |
 | GET | `/api/events` | SSE stream: `log` / `keys` / `stats` realtime events |
-| GET | `/api/stats?hours=24` | aggregate counters + `tokens_by_key` |
+| GET | `/api/stats?hours=24` or `?from=&to=` | aggregate counters + `tokens_by_key` for the range |
 | GET | `/api/config` | upstream + model map |
 | GET | `/healthz` | |
 
@@ -146,7 +152,7 @@ keys:
 ## Tests
 
 ```bash
-go test ./...          # 30 tests: pool selection, rate limits, backoff, gateway
+go test ./...          # 32 tests: pool selection, rate limits, backoff, gateway
                        # passthrough (failover, quota, auth, streaming) and a
                        # 50-request integration test that audits the request log
                        # for concurrency and rate-limit compliance

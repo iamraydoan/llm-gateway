@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"llm-gateway/internal/config"
 	"llm-gateway/internal/pool"
 	"llm-gateway/internal/store"
 )
@@ -25,14 +26,84 @@ func (g *Gateway) handleUI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(uiHTML)
 }
 
-func (g *Gateway) keysSnapshot() []byte {
-	now := time.Now()
+func (g *Gateway) keyStatuses(now time.Time) []pool.Status {
 	stats := make([]pool.Status, 0, len(g.pool.Keys()))
 	for _, k := range g.pool.Keys() {
 		st := k.Status(now)
 		st.SkipReason = kStatusReason(k, now)
 		stats = append(stats, st)
 	}
+	g.enrichKeyStatuses(stats, now)
+	return stats
+}
+
+func (g *Gateway) enrichKeyStatuses(stats []pool.Status, now time.Time) {
+	if g.store == nil {
+		return
+	}
+	if totals, err := g.store.TokensByKey(time.Time{}); err == nil {
+		byID := make(map[string]store.KeyTokenStat, len(totals))
+		for _, t := range totals {
+			byID[t.KeyID] = t
+		}
+		for i := range stats {
+			if t, ok := byID[stats[i].ID]; ok {
+				if succ := t.Requests - t.Errors; succ > stats[i].TotalRequests {
+					stats[i].TotalRequests = succ
+				}
+				if t.Errors > stats[i].TotalErrors {
+					stats[i].TotalErrors = t.Errors
+				}
+			}
+		}
+	}
+	if lastErrs, err := g.store.LastKeyErrors(); err == nil {
+		for i := range stats {
+			if stats[i].LastError == "" {
+				if e, ok := lastErrs[stats[i].ID]; ok {
+					stats[i].LastError = e.Error
+					if t, err := time.Parse(time.RFC3339Nano, e.TS); err == nil {
+						stats[i].LastErrorAt = t.Format(time.RFC3339)
+					}
+				}
+			}
+		}
+	}
+	windows := map[time.Duration]bool{}
+	for i := range stats {
+		for _, rl := range stats[i].RateLimits {
+			if d, err := config.ParseWindowDuration(rl.Window); err == nil && d > 0 {
+				windows[d] = true
+			}
+		}
+	}
+	for d := range windows {
+		counts, err := g.store.CountsByKeySince(now.Add(-d))
+		if err != nil {
+			continue
+		}
+		for i := range stats {
+			for j := range stats[i].RateLimits {
+				wd, err := config.ParseWindowDuration(stats[i].RateLimits[j].Window)
+				if err != nil || wd != d {
+					continue
+				}
+				used := stats[i].RateLimits[j].Max - stats[i].RateLimits[j].Remaining
+				if c := counts[stats[i].ID]; c > used {
+					used = c
+				}
+				rem := stats[i].RateLimits[j].Max - used
+				if rem < 0 {
+					rem = 0
+				}
+				stats[i].RateLimits[j].Remaining = rem
+			}
+		}
+	}
+}
+
+func (g *Gateway) keysSnapshot() []byte {
+	stats := g.keyStatuses(time.Now())
 	payload, err := json.Marshal(map[string]any{"keys": stats})
 	if err != nil {
 		return nil
@@ -40,16 +111,27 @@ func (g *Gateway) keysSnapshot() []byte {
 	return payload
 }
 
-func (g *Gateway) statsPayload(hours int) (map[string]any, error) {
-	if hours <= 0 {
-		hours = 24
+func (g *Gateway) statsPayload(from, to time.Time, hours int) (map[string]any, error) {
+	var st store.Stats
+	var byKey []store.KeyTokenStat
+	var err error
+	if !from.IsZero() || !to.IsZero() {
+		st, err = g.store.StatsRange(from, to)
+		if err != nil {
+			return nil, err
+		}
+		byKey, err = g.store.TokensByKeyRange(from, to)
+	} else {
+		if hours <= 0 {
+			hours = 24
+		}
+		since := time.Now().Add(-time.Duration(hours) * time.Hour)
+		st, err = g.store.StatsSince(since)
+		if err != nil {
+			return nil, err
+		}
+		byKey, err = g.store.TokensByKey(since)
 	}
-	since := time.Now().Add(-time.Duration(hours) * time.Hour)
-	st, err := g.store.StatsSince(since)
-	if err != nil {
-		return nil, err
-	}
-	byKey, err := g.store.TokensByKey(since)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +158,7 @@ func (g *Gateway) statsPayload(hours int) (map[string]any, error) {
 }
 
 func (g *Gateway) statsSnapshot(hours int) []byte {
-	payload, err := g.statsPayload(hours)
+	payload, err := g.statsPayload(time.Time{}, time.Time{}, hours)
 	if err != nil {
 		return nil
 	}
@@ -92,14 +174,7 @@ func (g *Gateway) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	now := time.Now()
-	stats := make([]pool.Status, 0, len(g.pool.Keys()))
-	for _, k := range g.pool.Keys() {
-		st := k.Status(now)
-		st.SkipReason = kStatusReason(k, now)
-		stats = append(stats, st)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": stats})
+	writeJSON(w, http.StatusOK, map[string]any{"keys": g.keyStatuses(time.Now())})
 }
 
 func kStatusReason(k *pool.Key, now time.Time) string {
@@ -203,8 +278,19 @@ func (g *Gateway) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleAPIStats(w http.ResponseWriter, r *http.Request) {
-	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
-	payload, err := g.statsPayload(hours)
+	q := r.URL.Query()
+	hours, _ := strconv.Atoi(q.Get("hours"))
+	from, err := parseLogTime(q.Get("from"), false)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	to, err := parseLogTime(q.Get("to"), true)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	payload, err := g.statsPayload(from, to, hours)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

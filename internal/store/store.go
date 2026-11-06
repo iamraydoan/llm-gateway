@@ -166,16 +166,38 @@ type Stats struct {
 	ByStatus              map[string]int `json:"by_status"`
 }
 
+func rangeWhere(from, to time.Time) (string, []any) {
+	var conds []string
+	var args []any
+	if !from.IsZero() {
+		conds = append(conds, "ts >= ?")
+		args = append(args, from.Format(time.RFC3339Nano))
+	}
+	if !to.IsZero() {
+		conds = append(conds, "ts <= ?")
+		args = append(args, to.Format(time.RFC3339Nano))
+	}
+	if len(conds) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(conds, " AND "), args
+}
+
 func (s *Store) StatsSince(since time.Time) (Stats, error) {
+	return s.StatsRange(since, time.Time{})
+}
+
+func (s *Store) StatsRange(from, to time.Time) (Stats, error) {
 	st := Stats{
 		ByKey:    map[string]int{},
 		ByModel:  map[string]int{},
 		ByStatus: map[string]int{},
 	}
+	where, args := rangeWhere(from, to)
 	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
-		COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM requests WHERE ts >= ?`,
-		since.Format(time.RFC3339Nano))
+		COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM requests `+where,
+		args...)
 	if err := row.Scan(&st.TotalRequests, &st.TotalErrors, &st.TotalTokens,
 		&st.TotalPromptTokens, &st.TotalCachedTokens, &st.TotalCompletionTokens); err != nil {
 		return st, fmt.Errorf("stats: %w", err)
@@ -184,11 +206,11 @@ func (s *Store) StatsSince(since time.Time) (Stats, error) {
 		sql string
 		dst *map[string]int
 	}{
-		{`SELECT key_id, COUNT(*) FROM requests WHERE ts >= ? GROUP BY key_id`, &st.ByKey},
-		{`SELECT model_requested, COUNT(*) FROM requests WHERE ts >= ? GROUP BY model_requested`, &st.ByModel},
-		{`SELECT CAST(status AS TEXT), COUNT(*) FROM requests WHERE ts >= ? GROUP BY status`, &st.ByStatus},
+		{`SELECT key_id, COUNT(*) FROM requests ` + where + ` GROUP BY key_id`, &st.ByKey},
+		{`SELECT model_requested, COUNT(*) FROM requests ` + where + ` GROUP BY model_requested`, &st.ByModel},
+		{`SELECT CAST(status AS TEXT), COUNT(*) FROM requests ` + where + ` GROUP BY status`, &st.ByStatus},
 	} {
-		rows, err := s.db.Query(q.sql, since.Format(time.RFC3339Nano))
+		rows, err := s.db.Query(q.sql, args...)
 		if err != nil {
 			return st, err
 		}
@@ -218,13 +240,19 @@ type KeyTokenStat struct {
 }
 
 func (s *Store) TokensByKey(since time.Time) ([]KeyTokenStat, error) {
+	return s.TokensByKeyRange(since, time.Time{})
+}
+
+func (s *Store) TokensByKeyRange(from, to time.Time) ([]KeyTokenStat, error) {
+	where, args := rangeWhere(from, to)
+	where = strings.Replace(where, "ts", "r.ts", -1)
 	rows, err := s.db.Query(`SELECT r.key_id, r.key_id,
 		COUNT(*), COALESCE(SUM(CASE WHEN r.status >= 400 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(r.prompt_tokens), 0), COALESCE(SUM(r.cached_tokens), 0),
 		COALESCE(SUM(r.completion_tokens), 0), COALESCE(SUM(r.total_tokens), 0)
 		FROM requests r
-		WHERE r.ts >= ? GROUP BY r.key_id ORDER BY COUNT(*) DESC`,
-		since.Format(time.RFC3339Nano))
+		`+where+` GROUP BY r.key_id ORDER BY COUNT(*) DESC`,
+		args...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +265,50 @@ func (s *Store) TokensByKey(since time.Time) ([]KeyTokenStat, error) {
 			return nil, err
 		}
 		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CountsByKeySince(since time.Time) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT key_id, COUNT(*) FROM requests
+		WHERE ts >= ? GROUP BY key_id`, since.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, err
+		}
+		out[k] = n
+	}
+	return out, rows.Err()
+}
+
+type LastKeyError struct {
+	Error string
+	TS    string
+}
+
+func (s *Store) LastKeyErrors() (map[string]LastKeyError, error) {
+	rows, err := s.db.Query(`SELECT key_id, error, ts FROM requests
+		WHERE id IN (SELECT MAX(id) FROM requests GROUP BY key_id)
+		AND status >= 400 AND error <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]LastKeyError{}
+	for rows.Next() {
+		var k string
+		var e LastKeyError
+		if err := rows.Scan(&k, &e.Error, &e.TS); err != nil {
+			return nil, err
+		}
+		out[k] = e
 	}
 	return out, rows.Err()
 }
