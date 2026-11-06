@@ -27,42 +27,45 @@ model_map:
   smart: gpt-4o
   gpt-4o-mini: gpt-4o-mini
 
+# Shared settings for every key below. A field set on a key itself wins
+# (including enabled: false, priority: 0, max_concurrency: 0). Only fields
+# set here are filled in; key_defaults must not set id, name or api_key.
+key_defaults:
+  priority: 1                     # lower = tried first
+  max_concurrency: 5              # max in-flight requests per key, 0 = unlimited
+  enabled: true
+  # proxy: ""                       # shared HTTP proxy for all keys, empty = direct
+  # relay_url: ""                   # shared 9Router-style relay for all keys
+  rate_limits:
+    - max: 5
+      window: 1m
+    - max: 100
+      window: 1h
+
 keys:
+  # Shorthand: just the api key, everything else comes from key_defaults.
+  - sk-REPLACE-ME-0
+
   - id: key-1
     name: "Main account"
     api_key: "sk-REPLACE-ME-1"
     proxy: ""                       # empty = direct; e.g. http://user:pass@host:port
     # relay_url: ""                   # optional: this key goes via the relay; wins over upstream.relay_url
-    priority: 1                     # lower = tried first
-    max_concurrency: 5              # max in-flight requests for this key, 0 = unlimited
-    enabled: true
-    rate_limits:
-      - max: 5
-        window: 1m
-      - max: 100
-        window: 1h
 
   - id: key-2
     name: "Backup via proxy"
     api_key: "sk-REPLACE-ME-2"
     proxy: "http://user:pass@127.0.0.1:8081"
-    priority: 2
-    max_concurrency: 3
-    enabled: true
-    rate_limits:
-      - max: 5
-        window: 1m
-      - max: 100
-        window: 1h
+    priority: 2                     # override: tried after key-1
 
   - id: key-3
     name: "High limit"
     api_key: "sk-REPLACE-ME-3"
-    proxy: ""
     priority: 3
     max_concurrency: 10
-    enabled: true
-    rate_limits:
+    relay_url: "https://your-relay.vercel.app"   # this key goes via the relay;
+                                              # relay wins over proxy when both are set
+    rate_limits:                    # override: this key gets its own limits
       - max: 20
         window: 1m
       - max: 500

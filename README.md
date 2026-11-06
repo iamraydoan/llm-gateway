@@ -162,13 +162,40 @@ keys:
         window: 1h
 ```
 
+Many keys sharing the same settings: put the shared fields in
+`key_defaults` once and list keys as bare api keys (one line each). A key
+written as an object overrides individual fields — including
+`enabled: false`, `priority: 0` and `max_concurrency: 0`. `key_defaults`
+must not set `id`, `name` or `api_key`. `proxy` and `relay_url` can also
+live in `key_defaults` or on a single key (relay wins over proxy when
+both are set); see `config.example.yaml` for a key of each kind.
+
+```yaml
+key_defaults:
+  priority: 1
+  max_concurrency: 1
+  enabled: true
+  rate_limits:
+    - max: 2
+      window: 1m
+    - max: 25
+      window: 1h
+keys:
+  - sk-aaa...
+  - sk-bbb...
+  - id: key-3
+    api_key: sk-ccc...
+    enabled: false   # this one key stays disabled
+```
+
 ## Tests
 
 ```bash
-go test ./...          # 32 tests: pool selection, rate limits, backoff, gateway
-                       # passthrough (failover, quota, auth, streaming) and a
-                       # 50-request integration test that audits the request log
-                       # for concurrency and rate-limit compliance
+go test ./...          # 42 tests: pool selection, rate limits, backoff, gateway
+                       # passthrough (failover, quota, auth, streaming, relay,
+                       # key defaults) and a 50-request integration test that
+                       # audits the request log for concurrency and rate-limit
+                       # compliance
 ```
 
 `e2e/` holds a mock upstream + test config for an end-to-end smoke test:

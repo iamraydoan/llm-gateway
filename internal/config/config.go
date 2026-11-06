@@ -27,6 +27,48 @@ type Key struct {
 	MaxConcurrency int             `yaml:"max_concurrency"`
 	Enabled        bool            `yaml:"enabled"`
 	RateLimits     []RateLimitRule `yaml:"rate_limits"`
+
+	set map[string]bool `yaml:"-"`
+}
+
+func (k *Key) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		k.APIKey = value.Value
+		k.set = map[string]bool{"api_key": true}
+		return nil
+	}
+	type plain Key
+	var p plain
+	if err := value.Decode(&p); err != nil {
+		return err
+	}
+	*k = Key(p)
+	k.set = map[string]bool{}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		k.set[value.Content[i].Value] = true
+	}
+	return nil
+}
+
+func (k *Key) applyDefaults(d Key) {
+	if !k.set["priority"] && d.set["priority"] {
+		k.Priority = d.Priority
+	}
+	if !k.set["max_concurrency"] && d.set["max_concurrency"] {
+		k.MaxConcurrency = d.MaxConcurrency
+	}
+	if !k.set["enabled"] && d.set["enabled"] {
+		k.Enabled = d.Enabled
+	}
+	if !k.set["proxy"] && d.set["proxy"] {
+		k.Proxy = d.Proxy
+	}
+	if !k.set["relay_url"] && d.set["relay_url"] {
+		k.RelayURL = d.RelayURL
+	}
+	if !k.set["rate_limits"] && d.set["rate_limits"] {
+		k.RateLimits = append([]RateLimitRule(nil), d.RateLimits...)
+	}
 }
 
 func (k Key) MaskedAPIKey() string {
@@ -50,10 +92,11 @@ type Upstream struct {
 }
 
 type Config struct {
-	Server   Server            `yaml:"server"`
-	Upstream Upstream          `yaml:"upstream"`
-	ModelMap map[string]string `yaml:"model_map"`
-	Keys     []Key             `yaml:"keys"`
+	Server      Server            `yaml:"server"`
+	Upstream    Upstream          `yaml:"upstream"`
+	ModelMap    map[string]string `yaml:"model_map"`
+	KeyDefaults Key               `yaml:"key_defaults"`
+	Keys        []Key             `yaml:"keys"`
 
 	DBPath string `yaml:"-"`
 }
@@ -121,22 +164,39 @@ func (c *Config) Validate() error {
 	if c.Server.MaxFailovers <= 0 {
 		c.Server.MaxFailovers = 10
 	}
+	for _, f := range []string{"id", "name", "api_key"} {
+		if c.KeyDefaults.set[f] {
+			return fmt.Errorf("config: key_defaults must not set %q (it is per key)", f)
+		}
+	}
+	for i := range c.Keys {
+		c.Keys[i].applyDefaults(c.KeyDefaults)
+	}
 	if len(c.Keys) == 0 {
 		return fmt.Errorf("config: no keys defined")
 	}
 	seen := map[string]bool{}
 	for i := range c.Keys {
+		if c.Keys[i].ID != "" {
+			if seen[c.Keys[i].ID] {
+				return fmt.Errorf("config: duplicate key id %q", c.Keys[i].ID)
+			}
+			seen[c.Keys[i].ID] = true
+		}
+	}
+	for i := range c.Keys {
 		k := &c.Keys[i]
 		if k.ID == "" {
-			k.ID = fmt.Sprintf("key-%d", i+1)
+			n := 1
+			for seen[fmt.Sprintf("key-%d", n)] {
+				n++
+			}
+			k.ID = fmt.Sprintf("key-%d", n)
+			seen[k.ID] = true
 		}
 		if k.Name == "" {
 			k.Name = k.ID
 		}
-		if seen[k.ID] {
-			return fmt.Errorf("config: duplicate key id %q", k.ID)
-		}
-		seen[k.ID] = true
 		if k.APIKey == "" {
 			return fmt.Errorf("config: key %q has empty api_key", k.ID)
 		}

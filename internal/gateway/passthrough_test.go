@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"llm-gateway/internal/config"
 	"llm-gateway/internal/pool"
 	"llm-gateway/internal/store"
@@ -507,6 +509,49 @@ func TestPassthroughRelayFailover(t *testing.T) {
 	logs := readAllLogs(t, st)
 	if len(logs) != 2 || logs[0].KeyID != "bad" || logs[0].Status != 429 || logs[1].KeyID != "good" {
 		t.Fatalf("logs = %+v, want bad/429 then good/200", logs)
+	}
+}
+
+func TestPassthroughKeyDefaults(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	var cfg config.Config
+	text := `
+upstream:
+  base_url: "http://unused.invalid"
+key_defaults:
+  priority: 1
+  max_concurrency: 1
+  enabled: true
+  rate_limits:
+    - max: 2
+      window: 1m
+keys:
+  - tok-good
+`
+	if err := yaml.Unmarshal([]byte(text), &cfg); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	gw, _ := newTestGateway(t, srv.URL, cfg.Keys, nil, "")
+	client := &http.Client{Timeout: 10 * time.Second}
+	status, _ := postChat(t, client, gw.URL, "gpt-4o-mini", false, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (string-form key + defaults must serve)", status)
+	}
+	if up.receivedCount("tok-good") != 1 {
+		t.Fatalf("upstream received = %d, want 1", up.receivedCount("tok-good"))
+	}
+	row := keyRowByID(keysList(t, gw.URL), "key-1")
+	if row == nil || row["priority"] != float64(1) || row["enabled"] != true {
+		t.Fatalf("keys row = %v, want priority 1 enabled true from defaults", row)
+	}
+	rls, _ := row["rate_limits"].([]any)
+	if len(rls) != 1 || rls[0].(map[string]any)["remaining"] != float64(1) {
+		t.Fatalf("rate_limits = %v, want 1 window with remaining 1 after one request", row["rate_limits"])
 	}
 }
 
