@@ -3,6 +3,8 @@ package pool
 import (
 	"context"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,9 +258,9 @@ func TestLastErrorDetail(t *testing.T) {
 		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
 	})
 	k := p.Find("k1")
-	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
+	k.ReportFailure(429, 0, false, time.Time{}, `{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
 	st := k.Status(time.Now())
-	if st.LastError != "rate_limit_exceeded: Rate limit reached" {
+	if st.LastError != `{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}` {
 		t.Fatalf("last error not stored: %q", st.LastError)
 	}
 	if st.LastErrorAt == "" {
@@ -270,7 +272,7 @@ func TestLastErrorDetail(t *testing.T) {
 	if st.RetryInSeconds <= 0 {
 		t.Fatalf("expected retry_in_seconds > 0, got %d", st.RetryInSeconds)
 	}
-	k.ReportFailure(429, 0, false, time.Time{}, "rate_limit_exceeded: Rate limit reached")
+	k.ReportFailure(429, 0, false, time.Time{}, `{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
 	if st := k.Status(time.Now()); st.Fails != 2 {
 		t.Fatalf("expected 2 consecutive failures, got %d", st.Fails)
 	}
@@ -278,5 +280,90 @@ func TestLastErrorDetail(t *testing.T) {
 	st = k.Status(time.Now())
 	if st.LastError != "" || st.Fails != 0 {
 		t.Fatalf("success should clear last error, got %q fails %d", st.LastError, st.Fails)
+	}
+}
+
+func TestReportFailureBackoffMax(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true},
+	})
+	k := p.Find("k1")
+	now := time.Now()
+	k.ReportFailure(429, 60*time.Second, false, time.Time{}, "rate limited")
+	if secs := k.Status(now).RetryInSeconds; secs < 59 || secs > 60 {
+		t.Fatalf("Retry-After 60s should win over 5s base backoff, got retry in %ds", secs)
+	}
+	k.ReportSuccess()
+	k.ReportFailure(429, 0, true, now.Add(5*time.Second), "quota")
+	if secs := k.Status(now).RetryInSeconds; secs < 4 || secs > 5 {
+		t.Fatalf("quota reset 5s should win over 5s backoff tie, got retry in %ds", secs)
+	}
+	k.ReportFailure(429, 0, true, now.Add(5*time.Second), "quota")
+	if secs := k.Status(now).RetryInSeconds; secs < 9 || secs > 10 {
+		t.Fatalf("2nd failure backoff 10s should win over quota reset 5s, got retry in %ds", secs)
+	}
+}
+
+func TestConcurrentAcquireHoldsLimit(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true, MaxConcurrency: 3},
+	})
+	var active, maxActive, failed int32
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, rel, err := p.Acquire(context.Background())
+			if err != nil {
+				atomic.AddInt32(&failed, 1)
+				return
+			}
+			cur := atomic.AddInt32(&active, 1)
+			mu.Lock()
+			if cur > maxActive {
+				maxActive = cur
+			}
+			mu.Unlock()
+			time.Sleep(20 * time.Millisecond)
+			atomic.AddInt32(&active, -1)
+			rel()
+		}()
+	}
+	wg.Wait()
+	if maxActive != 3 {
+		t.Fatalf("max simultaneous holders = %d, want exactly 3 (cap reached, never exceeded)", maxActive)
+	}
+	if failed == 0 {
+		t.Fatalf("expected some Acquire calls to fail while slots are full, got 0 failures")
+	}
+}
+
+func TestSlidingWindowExpiry(t *testing.T) {
+	p := testPool(t, []config.Key{
+		{ID: "k1", APIKey: "sk-1", Priority: 1, Enabled: true, RateLimits: []config.RateLimitRule{
+			{Max: 2, Window: "1m"},
+		}},
+	})
+	k := p.Find("k1")
+	now := time.Now()
+	rel1 := k.tryReserve(now)
+	if rel1 == nil {
+		t.Fatal("reserve 1 should succeed")
+	}
+	rel2 := k.tryReserve(now)
+	if rel2 == nil {
+		t.Fatal("reserve 2 should succeed")
+	}
+	if rel := k.tryReserve(now); rel != nil {
+		t.Fatal("reserve 3 should fail inside the 2/min window")
+	}
+	rel1()
+	rel2()
+	if rel := k.tryReserve(now.Add(61 * time.Second)); rel == nil {
+		t.Fatal("reserve after window expiry should succeed")
+	} else {
+		rel()
 	}
 }

@@ -165,53 +165,6 @@ func classifyUpstream(resp *http.Response, body []byte) upstreamError {
 	return ue
 }
 
-func extractUpstreamError(body []byte) string {
-	body = bytes.TrimSpace(body)
-	if len(body) == 0 {
-		return ""
-	}
-	var envelope struct {
-		Error json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal(body, &envelope) == nil && envelope.Error != nil {
-		var obj struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-		}
-		if json.Unmarshal(envelope.Error, &obj) == nil {
-			code := obj.Code
-			if code == "" {
-				code = obj.Type
-			}
-			switch {
-			case obj.Message != "" && code != "":
-				return truncateError(code+": "+obj.Message, 200)
-			case obj.Message != "":
-				return truncateError(obj.Message, 200)
-			case code != "":
-				return truncateError(code, 200)
-			default:
-				return ""
-			}
-		}
-		var s string
-		if json.Unmarshal(envelope.Error, &s) == nil {
-			return truncateError(s, 200)
-		}
-		return ""
-	}
-	return truncateError(string(body), 200)
-}
-
-func truncateError(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len([]rune(s)) > n {
-		return string([]rune(s)[:n]) + "…"
-	}
-	return s
-}
-
 func (g *Gateway) doUpstream(ctx context.Context, key *pool.Key, method, path string, body []byte, stream bool) (*http.Response, *upstreamError, error) {
 	req, err := http.NewRequestWithContext(ctx, method, g.cfg.Upstream.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -290,7 +243,7 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 		if doErr != nil {
 
 			cancel()
-			key.ReportFailure(0, 0, false, time.Time{}, truncateError(doErr.Error(), 200))
+			key.ReportFailure(0, 0, false, time.Time{}, doErr.Error())
 			release()
 			lastErrMsg = doErr.Error()
 			continue
@@ -298,7 +251,7 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 		if ue != nil {
 
 			cancel()
-			key.ReportFailure(ue.status, ue.retryAfter, ue.quota, ue.quotaReset, extractUpstreamError(ue.body))
+			key.ReportFailure(ue.status, ue.retryAfter, ue.quota, ue.quotaReset, strings.TrimSpace(string(ue.body)))
 			release()
 			lastErr = ue
 

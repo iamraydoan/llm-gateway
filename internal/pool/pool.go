@@ -232,6 +232,26 @@ func (k *Key) skipReason(now time.Time) string {
 	return ""
 }
 
+func (k *Key) usableAtLocked(now time.Time) time.Time {
+	var best time.Time
+	consider := func(t time.Time) {
+		if t.IsZero() || !t.After(now) {
+			return
+		}
+		if t.After(best) {
+			best = t
+		}
+	}
+	consider(k.cooldownUntil)
+	consider(k.quotaResetAt)
+	for _, w := range k.windows {
+		if w.remaining(now) <= 0 {
+			consider(w.resetAt(now))
+		}
+	}
+	return best
+}
+
 func (k *Key) earliestRetry(now time.Time) time.Time {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -279,23 +299,21 @@ func (k *Key) ReportFailure(status int, retryAfter time.Duration, quotaExhausted
 	k.LastError = detail
 	now := time.Now()
 	k.LastErrorAt = now
+	delay := backoffDelay(k.fails)
+	if retryAfter > delay {
+		delay = retryAfter
+	}
+	if !quotaReset.IsZero() {
+		if d := time.Until(quotaReset); d > delay {
+			delay = d
+		}
+	}
+	k.cooldownUntil = now.Add(delay)
 	if quotaExhausted {
-
-		if !quotaReset.IsZero() && quotaReset.After(now) {
-			k.quotaResetAt = quotaReset
-		} else if retryAfter > 0 {
-			k.quotaResetAt = now.Add(retryAfter)
-		} else {
-			k.quotaResetAt = now.Add(backoffDelay(k.fails))
+		k.quotaResetAt = quotaReset
+		if k.quotaResetAt.IsZero() {
+			k.quotaResetAt = k.cooldownUntil
 		}
-		k.cooldownUntil = k.quotaResetAt
-	} else {
-
-		delay := backoffDelay(k.fails)
-		if retryAfter > delay {
-			delay = retryAfter
-		}
-		k.cooldownUntil = now.Add(delay)
 	}
 	notify := k.notify
 	k.mu.Unlock()
@@ -365,7 +383,7 @@ func (k *Key) Status(now time.Time) Status {
 	if !k.LastErrorAt.IsZero() {
 		s.LastErrorAt = k.LastErrorAt.Format(time.RFC3339)
 	}
-	if next := k.earliestRetryLocked(now); !next.IsZero() {
+	if next := k.usableAtLocked(now); !next.IsZero() {
 		if secs := int(time.Until(next).Seconds()); secs > 0 {
 			s.RetryInSeconds = secs
 		}
