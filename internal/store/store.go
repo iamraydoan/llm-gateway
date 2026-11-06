@@ -115,7 +115,7 @@ func (f LogFilter) where() (string, []any) {
 		args = append(args, f.Status)
 	}
 	if f.Errors {
-		conds = append(conds, "status >= 400")
+		conds = append(conds, "status >= 400 AND status != 499")
 	}
 	if len(conds) == 0 {
 		return "", args
@@ -194,7 +194,7 @@ func (s *Store) StatsRange(from, to time.Time) (Stats, error) {
 		ByStatus: map[string]int{},
 	}
 	where, args := rangeWhere(from, to)
-	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0),
+	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status >= 400 AND status != 499 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(total_tokens), 0), COALESCE(SUM(prompt_tokens), 0),
 		COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(completion_tokens), 0) FROM requests `+where,
 		args...)
@@ -247,7 +247,7 @@ func (s *Store) TokensByKeyRange(from, to time.Time) ([]KeyTokenStat, error) {
 	where, args := rangeWhere(from, to)
 	where = strings.Replace(where, "ts", "r.ts", -1)
 	rows, err := s.db.Query(`SELECT r.key_id, r.key_id,
-		COUNT(*), COALESCE(SUM(CASE WHEN r.status >= 400 THEN 1 ELSE 0 END), 0),
+		COUNT(*), COALESCE(SUM(CASE WHEN r.status >= 400 AND r.status != 499 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(r.prompt_tokens), 0), COALESCE(SUM(r.cached_tokens), 0),
 		COALESCE(SUM(r.completion_tokens), 0), COALESCE(SUM(r.total_tokens), 0)
 		FROM requests r
@@ -296,7 +296,7 @@ type LastKeyError struct {
 func (s *Store) LastKeyErrors() (map[string]LastKeyError, error) {
 	rows, err := s.db.Query(`SELECT key_id, error, ts FROM requests
 		WHERE id IN (SELECT MAX(id) FROM requests GROUP BY key_id)
-		AND status >= 400 AND error <> ''`)
+		AND status >= 400 AND status != 499 AND error <> ''`)
 	if err != nil {
 		return nil, err
 	}

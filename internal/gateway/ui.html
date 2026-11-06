@@ -349,7 +349,7 @@ function logRowHtml(l, withStream) {
     <td class="mono">${new Date(l.ts).toLocaleString()}</td>
     <td class="mono">${esc(l.key_id || '—')}</td>
     <td class="mono">${esc(l.model_requested)}${l.model_upstream !== l.model_requested ? ' → ' + esc(l.model_upstream) : ''}</td>
-    <td class="${l.status >= 400 ? 'err' : 'ok'}">${l.status}</td>
+    <td class="${l.status === 499 ? 'muted' : l.status >= 400 ? 'err' : 'ok'}">${l.status}</td>
     <td>${l.latency_ms} ms</td>
     ${withStream
       ? `<td>${l.prompt_tokens || '—'}</td><td>${l.cached_tokens || '—'}</td><td>${l.completion_tokens || '—'}</td><td><strong>${l.total_tokens || '—'}</strong></td>`
@@ -444,7 +444,7 @@ function logMatchesFilters(l) {
   if (model && l.model_requested !== model && l.model_upstream !== model) return false;
   const status = $('#f-status').value;
   if (status && String(l.status) !== status) return false;
-  if ($('#f-errors').checked && l.status < 400) return false;
+  if ($('#f-errors').checked && (l.status < 400 || l.status === 499)) return false;
   return true;
 }
 
@@ -465,7 +465,7 @@ function logInDashRange(l) {
 function applyLogEvent(l) {
   if (currentStats && logInDashRange(l)) {
     currentStats.total_requests = (currentStats.total_requests || 0) + 1;
-    if (l.status >= 400) currentStats.total_errors = (currentStats.total_errors || 0) + 1;
+    if (l.status >= 400 && l.status !== 499) currentStats.total_errors = (currentStats.total_errors || 0) + 1;
     currentStats.total_tokens = (currentStats.total_tokens || 0) + (l.total_tokens || 0);
     currentStats.total_prompt_tokens = (currentStats.total_prompt_tokens || 0) + (l.prompt_tokens || 0);
     currentStats.total_cached_tokens = (currentStats.total_cached_tokens || 0) + (l.cached_tokens || 0);
@@ -479,7 +479,7 @@ function applyLogEvent(l) {
     if (row) {
       const bump = (sel, n) => { const el = row.querySelector(sel); if (el) el.textContent = (parseInt(el.textContent.replace(/,/g, ''), 10) || 0) + n; };
       bump('.c-req', 1);
-      if (l.status >= 400) bump('.c-err', 1);
+      if (l.status >= 400 && l.status !== 499) bump('.c-err', 1);
       bump('.c-pt', l.prompt_tokens || 0);
       bump('.c-cached', l.cached_tokens || 0);
       bump('.c-ct', l.completion_tokens || 0);

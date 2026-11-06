@@ -263,6 +263,9 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 	lg := &requestLog{modelRequested: modelReq, modelUpstream: modelUp, start: time.Now(), stream: stream}
 
 	res := g.runAttempts(r.Context(), r.Method, r.URL.RequestURI(), body, stream, lg)
+	if res.canceled {
+		return
+	}
 	if res.resp != nil {
 		lg.keyID = res.key.ID()
 		lg.status = res.resp.StatusCode
@@ -327,6 +330,7 @@ type attemptResult struct {
 	poolErr    error
 	lastErr    *upstreamError
 	lastErrMsg string
+	canceled   bool
 }
 
 func (g *Gateway) runAttempts(ctx context.Context, method, path string, body []byte, stream bool, lg *requestLog) attemptResult {
@@ -347,6 +351,13 @@ func (g *Gateway) runAttempts(ctx context.Context, method, path string, body []b
 		resp, ue, doErr := g.doUpstream(actx, key, method, path, body, stream)
 		if doErr != nil {
 			cancel()
+			if ctx.Err() != nil {
+				release()
+				attemptLog.status = 499
+				attemptLog.errMsg = "client canceled"
+				g.finishLog(attemptLog)
+				return attemptResult{canceled: true}
+			}
 			key.ReportFailure(0, 0, false, time.Time{}, doErr.Error())
 			release()
 			attemptLog.status = http.StatusBadGateway

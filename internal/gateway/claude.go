@@ -64,6 +64,9 @@ func (g *Gateway) claudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	lg := &requestLog{modelRequested: meta.Model, modelUpstream: meta.Model, start: time.Now(), stream: meta.Stream}
 	res := g.runAttempts(r.Context(), r.Method, "/v1/messages", body, meta.Stream, lg)
+	if res.canceled {
+		return
+	}
 	if res.resp != nil {
 		lg.keyID = res.key.ID()
 		lg.status = res.resp.StatusCode

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1146,6 +1147,7 @@ func TestDashboardUIMobile(t *testing.T) {
 		`id="log-presets"`,
 		`fmtLocalInput(`,
 		`logPresetHours`,
+		`l.status === 499`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("dashboard HTML missing %q", want)
@@ -1220,5 +1222,95 @@ func TestAPILogsHoursParam(t *testing.T) {
 	}
 	if got := logs("limit=50")["total"]; got != float64(2) {
 		t.Fatalf("no hours total = %v, want 2", got)
+	}
+}
+
+func TestClientCancelDoesNotPenalizeKey(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(10 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+		}
+	}))
+	defer up.Close()
+	gw, st := newTestGateway(t, up.URL, []config.Key{
+		{ID: "good", APIKey: "tok-good", Priority: 1, Enabled: true,
+			RateLimits: []config.RateLimitRule{{Max: 1, Window: "1m"}}},
+	}, nil, "")
+	defer gw.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	payload, _ := json.Marshal(map[string]any{
+		"model": "gpt-4o-mini", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gw.URL+"/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("canceled request unexpectedly succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled request did not return")
+	}
+	var entries []store.Entry
+	for i := 0; i < 20; i++ {
+		entries = readAllLogs(t, st)
+		if len(entries) == 1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("logged entries = %d, want 1", len(entries))
+	}
+	if entries[0].Status != 499 || entries[0].Error != "client canceled" {
+		t.Fatalf("log entry = status %d error %q, want 499 \"client canceled\"", entries[0].Status, entries[0].Error)
+	}
+	row := keyRowByID(keysList(t, gw.URL), "good")
+	if row == nil {
+		t.Fatal("key good missing from /api/keys")
+	}
+	if row["skip_reason"] != "rate-limited" {
+		t.Fatalf("skip_reason = %v, want rate-limited (cancel still consumes the rate-limit unit)", row["skip_reason"])
+	}
+	if row["consecutive_failures"] != float64(0) {
+		t.Fatalf("consecutive_failures = %v, want 0", row["consecutive_failures"])
+	}
+	if row["last_error"] != "" && row["last_error"] != nil {
+		t.Fatalf("last_error = %v, want empty", row["last_error"])
+	}
+	stats := statsPayload(t, gw.URL+"/api/stats?hours=0")
+	if stats["total_requests"] != float64(1) || stats["total_errors"] != float64(0) {
+		t.Fatalf("stats = %+v, want 1 request 0 errors", stats)
+	}
+	resp, err := http.Get(gw.URL + "/api/logs?errors=true")
+	if err != nil {
+		t.Fatalf("logs errors get: %v", err)
+	}
+	defer resp.Body.Close()
+	var logsOut struct {
+		Total int `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&logsOut); err != nil {
+		t.Fatalf("logs decode: %v", err)
+	}
+	if logsOut.Total != 0 {
+		t.Fatalf("errors-only logs total = %d, want 0", logsOut.Total)
 	}
 }
