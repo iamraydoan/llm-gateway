@@ -313,6 +313,7 @@ func (g *Gateway) Routes() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", g.passthrough)
 	mux.HandleFunc("/v1/embeddings", g.passthrough)
 	mux.HandleFunc("/v1/completions", g.passthrough)
+	mux.HandleFunc("/v1/messages", g.claudeMessages)
 	mux.HandleFunc("/v1/models", g.handleModels)
 
 	mux.HandleFunc("/", g.handleUI)

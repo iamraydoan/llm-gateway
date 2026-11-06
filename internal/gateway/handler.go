@@ -262,49 +262,90 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 
 	lg := &requestLog{modelRequested: modelReq, modelUpstream: modelUp, start: time.Now(), stream: stream}
 
-	var lastErr *upstreamError
-	var lastErrMsg string
-	for attempt := 0; attempt < g.maxAttempts(); attempt++ {
-		key, release, err := g.pool.Acquire(r.Context())
-		if err != nil {
-			var noKey *pool.ErrNoKeyAvailable
-			if errors.As(err, &noKey) {
-				if lastErr != nil {
-					if lastErr.retryAfter == 0 && noKey.RetryAfter > 0 {
-						w.Header().Set("Retry-After", fmt.Sprintf("%d", int(noKey.RetryAfter.Seconds())))
-					}
-					proxyErrorBody(w, lastErr)
-					lg.keyID = ""
-					lg.status = lastErr.status
-					lg.errMsg = strings.TrimSpace(string(lastErr.body))
-					g.finishLog(lg)
-					return
-				}
-				if noKey.RetryAfter > 0 {
-					w.Header().Set("Retry-After", fmt.Sprintf("%d", int(noKey.RetryAfter.Seconds())))
-				}
-				writeJSON(w, http.StatusTooManyRequests, map[string]any{
-					"error": map[string]any{"message": noKey.Error(), "type": "rate_limit_error"},
-				})
-				lg.keyID = ""
-				lg.status = http.StatusTooManyRequests
-				lg.errMsg = noKey.Error()
-				g.finishLog(lg)
-				return
+	res := g.runAttempts(r.Context(), r.Method, r.URL.RequestURI(), body, stream, lg)
+	if res.resp != nil {
+		lg.keyID = res.key.ID()
+		lg.status = res.resp.StatusCode
+		if stream {
+			g.serveStream(w, r, res.resp, lg)
+		} else {
+			g.serveJSON(w, res.resp, lg)
+		}
+		res.key.ReportSuccess()
+		res.release()
+		res.cancel()
+		g.finishLog(lg)
+		return
+	}
+	if res.noKey != nil {
+		if res.lastErr != nil {
+			if res.lastErr.retryAfter == 0 && res.noKey.RetryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(res.noKey.RetryAfter.Seconds())))
 			}
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": err.Error()}})
+			proxyErrorBody(w, res.lastErr)
 			lg.keyID = ""
-			lg.status = http.StatusServiceUnavailable
-			lg.errMsg = err.Error()
+			lg.status = res.lastErr.status
+			lg.errMsg = strings.TrimSpace(string(res.lastErr.body))
 			g.finishLog(lg)
 			return
 		}
+		if res.noKey.RetryAfter > 0 {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(res.noKey.RetryAfter.Seconds())))
+		}
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": map[string]any{"message": res.noKey.Error(), "type": "rate_limit_error"},
+		})
+		lg.keyID = ""
+		lg.status = http.StatusTooManyRequests
+		lg.errMsg = res.noKey.Error()
+		g.finishLog(lg)
+		return
+	}
+	if res.poolErr != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": res.poolErr.Error()}})
+		lg.keyID = ""
+		lg.status = http.StatusServiceUnavailable
+		lg.errMsg = res.poolErr.Error()
+		g.finishLog(lg)
+		return
+	}
+	if res.lastErr != nil {
+		proxyErrorBody(w, res.lastErr)
+		return
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"error": map[string]any{"message": "all upstream keys failed: " + res.lastErrMsg, "type": "gateway_error"},
+	})
+}
 
-		attemptLog := &requestLog{keyID: key.ID(), modelRequested: modelReq, modelUpstream: modelUp, start: time.Now()}
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Upstream.TimeoutSeconds)*time.Second)
-		resp, ue, doErr := g.doUpstream(ctx, key, r.Method, r.URL.RequestURI(), body, stream)
+type attemptResult struct {
+	resp       *http.Response
+	key        *pool.Key
+	release    func()
+	cancel     context.CancelFunc
+	noKey      *pool.ErrNoKeyAvailable
+	poolErr    error
+	lastErr    *upstreamError
+	lastErrMsg string
+}
+
+func (g *Gateway) runAttempts(ctx context.Context, method, path string, body []byte, stream bool, lg *requestLog) attemptResult {
+	var lastErr *upstreamError
+	var lastErrMsg string
+	for attempt := 0; attempt < g.maxAttempts(); attempt++ {
+		key, release, err := g.pool.Acquire(ctx)
+		if err != nil {
+			var noKey *pool.ErrNoKeyAvailable
+			if errors.As(err, &noKey) {
+				return attemptResult{noKey: noKey, lastErr: lastErr, lastErrMsg: lastErrMsg}
+			}
+			return attemptResult{poolErr: err, lastErr: lastErr, lastErrMsg: lastErrMsg}
+		}
+
+		attemptLog := &requestLog{keyID: key.ID(), modelRequested: lg.modelRequested, modelUpstream: lg.modelUpstream, start: time.Now()}
+		actx, cancel := context.WithTimeout(ctx, time.Duration(g.cfg.Upstream.TimeoutSeconds)*time.Second)
+		resp, ue, doErr := g.doUpstream(actx, key, method, path, body, stream)
 		if doErr != nil {
-
 			cancel()
 			key.ReportFailure(0, 0, false, time.Time{}, doErr.Error())
 			release()
@@ -315,7 +356,6 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if ue != nil {
-
 			cancel()
 			key.ReportFailure(ue.status, ue.retryAfter, ue.quota, ue.quotaReset, strings.TrimSpace(string(ue.body)))
 			release()
@@ -326,29 +366,11 @@ func (g *Gateway) passthrough(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// success — cancel only AFTER the body is fully served, otherwise
-		// the context cancel kills an in-flight SSE stream.
-		lg.keyID = key.ID()
-		lg.status = resp.StatusCode
-		if stream {
-			g.serveStream(w, r, resp, lg)
-		} else {
-			g.serveJSON(w, resp, lg)
-		}
-		key.ReportSuccess()
-		release()
-		cancel()
-		g.finishLog(lg)
-		return
+		// success — the caller serves the body first, then reports success
+		// and cancels: cancelling earlier kills an in-flight SSE stream.
+		return attemptResult{resp: resp, key: key, release: release, cancel: cancel}
 	}
-
-	if lastErr != nil {
-		proxyErrorBody(w, lastErr)
-		return
-	}
-	writeJSON(w, http.StatusBadGateway, map[string]any{
-		"error": map[string]any{"message": "all upstream keys failed: " + lastErrMsg, "type": "gateway_error"},
-	})
+	return attemptResult{lastErr: lastErr, lastErrMsg: lastErrMsg}
 }
 
 func proxyErrorBody(w http.ResponseWriter, ue *upstreamError) {
