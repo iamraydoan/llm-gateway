@@ -17,7 +17,7 @@
   nav a:hover { background:var(--panel2); }
   nav a.active { background:var(--panel2); font-weight:600; }
   nav a .count { float:right; color:var(--muted); font-size:12px; }
-  main { flex:1; padding:20px 24px; max-width:1150px; }
+  main { flex:1; min-width:0; padding:20px 24px; max-width:1150px; }
   .page { display:none; }
   .page.active { display:block; }
   .page-head { display:flex; align-items:baseline; gap:12px; margin-bottom:16px; }
@@ -76,9 +76,41 @@
   .modal .actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
   .live-on { color:var(--green); font-weight:600; }
   .live-off { color:var(--muted); }
+  .topbar { display:none; }
+  #nav-backdrop { display:none; }
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  @media (max-width: 900px) {
+    .topbar { display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:30; background:var(--panel); border-bottom:1px solid var(--border); padding:10px 14px; }
+    .topbar h1 { font-size:16px; margin:0; }
+    .topbar .spacer { flex:1; }
+    .topbar .live-dot { font-size:12px; white-space:nowrap; }
+    nav { position:fixed; top:0; left:0; bottom:0; z-index:40; width:260px; max-width:85vw; transform:translateX(-105%); transition:transform .2s ease; overflow-y:auto; box-shadow:0 0 24px rgba(0,0,0,.5); }
+    body.nav-open nav { transform:none; }
+    #nav-backdrop { display:block; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:35; opacity:0; pointer-events:none; transition:opacity .2s ease; }
+    body.nav-open #nav-backdrop { opacity:1; pointer-events:auto; }
+    main { padding:16px 14px; }
+    .page-head { flex-wrap:wrap; }
+    .table-wrap table { min-width:720px; }
+    .modal-back { padding:16px 12px; }
+    .modal { max-height:calc(100vh - 32px); overflow-y:auto; }
+    .row2 { grid-template-columns:1fr; }
+  }
+  @media (max-width: 600px) {
+    .filters > div { flex:1 1 45%; }
+    .filters input, .filters select { width:100%; }
+    .cards { grid-template-columns:repeat(2, 1fr); }
+    .card .value { font-size:22px; }
+  }
 </style>
 </head>
 <body>
+<header class="topbar">
+  <button id="nav-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
+  <h1>LLM Gateway</h1>
+  <span class="spacer"></span>
+  <span class="live-dot live-off" id="live-dot-top">○ connecting…</span>
+</header>
+<div id="nav-backdrop"></div>
 <div class="layout">
   <nav>
     <h1>LLM Gateway</h1>
@@ -87,7 +119,7 @@
     <a href="#/keys" data-page="keys">Keys <span class="count" id="nav-key-count"></span></a>
     <a href="#/logs" data-page="logs">Logs</a>
     <a href="#/models" data-page="models">Model Map</a>
-    <div style="margin-top:24px; padding:0 12px; font-size:12px;" class="muted"><span id="live-dot" class="live-off">○ connecting…</span><br><span id="clock"></span></div>
+    <div style="margin-top:24px; padding:0 12px; font-size:12px;" class="muted"><span id="live-dot" class="live-dot live-off">○ connecting…</span><br><span id="clock"></span></div>
   </nav>
   <main>
     <section class="page" id="page-dashboard">
@@ -113,23 +145,23 @@
         <div class="card"><div class="label">Keys in flight</div><div class="value" id="st-flight">–</div></div>
       </div>
       <h3>Token usage by key (24h)</h3>
-      <table id="tokens-by-key">
+      <div class="table-wrap"><table id="tokens-by-key">
         <thead><tr><th>Key</th><th>Requests</th><th>Errors</th><th>Prompt tokens</th><th>Cached tokens</th><th>Completion tokens</th><th>Total tokens</th></tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
       <h3>Recent requests</h3>
-      <table id="dash-logs">
+      <div class="table-wrap"><table id="dash-logs">
         <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Error</th></tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
     </section>
 
     <section class="page" id="page-keys">
       <div class="page-head"><h2>Keys</h2><span class="muted">from config.yaml — edit the file and restart to change</span></div>
-      <table id="keys">
+      <div class="table-wrap"><table id="keys">
         <thead><tr><th>Name</th><th>ID / API key</th><th>Priority</th><th>Status</th><th>In flight</th><th>Rate limits</th><th>Requests / Errors</th><th>Cooldown / Quota reset</th><th>Last error</th><th>Proxy</th></tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
     </section>
 
     <section class="page" id="page-logs">
@@ -145,10 +177,10 @@
         <button class="primary" onclick="applyLogFilters()">Apply</button>
         <button onclick="resetLogFilters()">Reset</button>
       </div>
-      <table id="logs">
+      <div class="table-wrap"><table id="logs">
         <thead><tr><th>Time</th><th>Key</th><th>Model</th><th>Status</th><th>Latency</th><th>Prompt tokens</th><th>Cached tokens</th><th>Completion tokens</th><th>Total tokens</th><th>Stream</th><th>Error</th></tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
       <div class="pager">
         <button id="pg-prev" onclick="logPage(-1)">← Prev</button>
         <span class="info" id="pg-info"></span>
@@ -447,11 +479,23 @@ function applyLogEvent(l) {
 }
 function setLive(on) {
   live = on;
-  const dot = $('#live-dot');
-  dot.textContent = on ? '● LIVE' : '○ offline — polling';
-  dot.className = on ? 'live-on' : 'live-off';
+  $$('.live-dot').forEach(dot => {
+    dot.textContent = on ? '● LIVE' : '○ offline — polling';
+    dot.className = 'live-dot ' + (on ? 'live-on' : 'live-off');
+  });
   if (on) stopPolling(); else startPolling();
 }
+const navToggle = $('#nav-toggle');
+function setNav(open) {
+  document.body.classList.toggle('nav-open', open);
+  navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  navToggle.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+}
+navToggle.addEventListener('click', () => setNav(!document.body.classList.contains('nav-open')));
+$('#nav-backdrop').addEventListener('click', () => setNav(false));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') setNav(false); });
+$$('nav a').forEach(a => a.addEventListener('click', () => setNav(false)));
+window.addEventListener('hashchange', () => setNav(false));
 function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(() => {

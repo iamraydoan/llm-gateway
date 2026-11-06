@@ -1116,3 +1116,36 @@ func TestPassthroughSuccessClearsStoredError(t *testing.T) {
 		t.Fatalf("log keys = %v, want [flaky good flaky]", got)
 	}
 }
+
+func TestDashboardUIMobile(t *testing.T) {
+	up := newFakeUpstream()
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	gw, _ := newTestGateway(t, srv.URL, []config.Key{
+		{ID: "key-1", APIKey: "sk-test", Priority: 1, MaxConcurrency: 1},
+	}, nil, "")
+	defer gw.Close()
+	res, err := http.Get(gw.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d", res.StatusCode)
+	}
+	for _, want := range []string{
+		`name="viewport"`,
+		`id="nav-toggle"`,
+		`id="nav-backdrop"`,
+		`class="topbar"`,
+		`class="table-wrap"`,
+		`@media (max-width: 900px)`,
+		`setNav(`,
+		`min-width:0`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("dashboard HTML missing %q", want)
+		}
+	}
+}
